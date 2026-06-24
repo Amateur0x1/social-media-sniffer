@@ -32,22 +32,11 @@ export default defineManifest({
       matches: ["https://www.xiaohongshu.com/*"],
       run_at: "document_start",
     },
-    {
-      js: ["src/content/creator-sniffer.ts"],
-      matches: ["https://creator.xiaohongshu.com/*"],
-      run_at: "document_start",
-    },
   ],
   web_accessible_resources: [
     {
-      resources: [
-        "src/content/xhs-injected.js",
-        "src/content/creator-injected.js",
-      ],
-      matches: [
-        "https://www.xiaohongshu.com/*",
-        "https://creator.xiaohongshu.com/*",
-      ],
+      resources: ["src/content/xhs-injected.js"],
+      matches: ["https://www.xiaohongshu.com/*"],
     },
   ],
 });

@@ -4,10 +4,9 @@
  * 设计原则：只存数据，不发请求。
  * 所有数据都来自页面自己发的 API 响应，通过 content script 监听后存入这里。
  *
- * 三个数据来源：
+ * 两个数据来源：
  * 1. explore — 发现页浏览到的笔记（研究竞品内容）
  * 2. user — 特定博主主页的笔记（研究对标博主，按博主分组）
- * 3. creator — 创作者中心自己的数据
  */
 
 // ── 页面来源类型 ──
@@ -16,7 +15,6 @@
 export type PageContext =
   | { page: "explore" }
   | { page: "user"; user_id: string; user_name?: string }
-  | { page: "creator" }
   | { page: "note_detail" }; // 笔记详情页 /explore/{note_id}
 
 // ── 类型定义 ──
@@ -56,7 +54,7 @@ export interface NoteEntry {
   author?: string;
   author_id?: string;
   /** 数据来源页面 */
-  source: "explore" | "user" | "creator" | "note_detail";
+  source: "explore" | "user" | "note_detail";
   /** user 来源时，所属博主的 user_id */
   source_user_id?: string;
 }
@@ -101,15 +99,12 @@ export interface SnifferData {
   comments: Record<string, CommentEntry[]>;
   /** 博主笔记卡片列表（来自 user_posted API） */
   noteCards: NoteCard[];
-  /** 创作者中心的笔记列表 (galaxy API) */
-  creatorNotes: Record<string, NoteEntry>;
   /** 采集到的博主信息 */
   userProfiles: Record<string, UserProfile>;
   stats: {
     feedRequests: number;
     commentRequests: number;
     userPostedRequests: number;
-    galaxyRequests: number;
   };
 }
 
@@ -120,13 +115,11 @@ function emptyData(): SnifferData {
     notes: {},
     comments: {},
     noteCards: [],
-    creatorNotes: {},
     userProfiles: {},
     stats: {
       feedRequests: 0,
       commentRequests: 0,
       userPostedRequests: 0,
-      galaxyRequests: 0,
     },
   };
 }
@@ -166,10 +159,6 @@ export function toInt(v: unknown): number {
 export function parsePageContext(url: string): PageContext {
   try {
     const u = new URL(url);
-
-    if (u.hostname === "creator.xiaohongshu.com") {
-      return { page: "creator" };
-    }
 
     // /user/profile/{user_id}
     const userMatch = u.pathname.match(/^\/user\/profile\/([a-f0-9]+)/);

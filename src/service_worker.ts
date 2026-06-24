@@ -2,7 +2,7 @@
  * Service Worker — 数据汇聚中心。
  *
  * 接收来自 content script 的 SNIFFER_DATA 消息，
- * 根据 pageUrl 判断来源场景（explore / user / creator），
+ * 根据 pageUrl 判断来源场景（explore / user），
  * 解析后合并写入 chrome.storage.local。
  *
  * 设计原则：只聚合数据，不发任何网络请求。
@@ -74,7 +74,15 @@ chrome.runtime.onMessage.addListener(
 async function handleSniffData(msg: SniffMessage): Promise<void> {
   const data = await loadData();
   const payload = msg.payload as Record<string, unknown>;
-  const ctx = parsePageContext(msg.pageUrl);
+  let ctx = parsePageContext(msg.pageUrl);
+
+  // user_posted API 一定来自 user 页面，即使 pageUrl 解析不出来也要补上
+  if (msg.source === "user_posted" && ctx.page !== "user") {
+    const userId = extractUserIdFromApiUrl(msg.url);
+    if (userId) {
+      ctx = { page: "user", user_id: userId };
+    }
+  }
 
   console.log("[SM Sniffer] 页面来源:", ctx.page, msg.source, msg.pageUrl);
 
@@ -87,9 +95,6 @@ async function handleSniffData(msg: SniffMessage): Promise<void> {
       break;
     case "user_posted":
       mergeUserPosted(data, payload, ctx);
-      break;
-    case "galaxy":
-      mergeGalaxy(data, payload);
       break;
   }
 
@@ -247,54 +252,6 @@ function mergeUserPosted(data: SnifferData, raw: Record<string, unknown>, ctx: P
   }
 }
 
-// ── Galaxy 创作者中心 ──
-
-function mergeGalaxy(data: SnifferData, raw: Record<string, unknown>): void {
-  data.stats.galaxyRequests++;
-
-  const d = raw.data as Record<string, unknown> | undefined;
-  if (!d) return;
-
-  const notes = (d.notes ?? d.note_list) as unknown[] | undefined;
-  if (Array.isArray(notes)) {
-    for (const n of notes) {
-      const note = n as Record<string, unknown>;
-      const noteId = note.note_id as string;
-      if (!noteId) continue;
-
-      const entry: NoteEntry = {
-        note_id: noteId,
-        title: (note.title as string) || "",
-        desc: (note.desc as string) || "",
-        type: (note.type as string) || "normal",
-        time: (note.create_time as number) || 0,
-        ip_location: "",
-        like_count: toInt(note.like_count),
-        collect_count: toInt(note.collect_count),
-        comment_count: toInt(note.comment_count),
-        share_count: toInt(note.share_count),
-        tags: [],
-        images: note.cover ? [note.cover as string] : [],
-        source: "creator",
-      };
-
-      data.creatorNotes[noteId] = entry;
-    }
-  }
-
-  const stats = d.note_stats as Record<string, unknown> | undefined;
-  if (stats) {
-    const noteId = (stats.note_id ?? d.note_id) as string | undefined;
-    if (noteId && data.creatorNotes[noteId]) {
-      const existing = data.creatorNotes[noteId];
-      existing.like_count = toInt(stats.like_count) || existing.like_count;
-      existing.collect_count = toInt(stats.collect_count) || existing.collect_count;
-      existing.comment_count = toInt(stats.comment_count) || existing.comment_count;
-      existing.share_count = toInt(stats.share_count) || existing.share_count;
-    }
-  }
-}
-
 // ── 博主 Profile 更新 ──
 
 function updateUserProfile(data: SnifferData, userId: string, userName: string): void {
@@ -394,4 +351,17 @@ function extractImageUrl(img: Record<string, unknown>): string | undefined {
   }
 
   return undefined;
+}
+
+// ── 从 API URL 提取 user_id ──
+
+function extractUserIdFromApiUrl(apiUrl: string): string | undefined {
+  try {
+    const u = new URL(apiUrl, "https://www.xiaohongshu.com");
+    return u.searchParams.get("user_id") || undefined;
+  } catch {
+    // 尝试用正则兜底
+    const match = apiUrl.match(/[?&]user_id=([a-f0-9]+)/);
+    return match ? match[1] : undefined;
+  }
 }

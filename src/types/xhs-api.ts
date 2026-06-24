@@ -185,34 +185,9 @@ export interface WebV1UserPostedResponse {
   };
 }
 
-// ── Galaxy 创作者中心 API ──
-
-export interface GalaxyNote {
-  note_id: string;
-  title: string;
-  desc?: string;
-  type: string;
-  cover?: string;
-  create_time?: number;
-  /** 笔记数据统计 */
-  read_count?: number;
-  like_count?: number;
-  collect_count?: number;
-  comment_count?: number;
-  share_count?: number;
-}
-
-export interface GalaxyNoteListResponse {
-  data: {
-    notes: GalaxyNote[];
-    has_more: boolean;
-    cursor?: string;
-  };
-}
-
 // ── 内部消息 ──
 
-export type SniffSource = "feed" | "comment" | "user_posted" | "galaxy";
+export type SniffSource = "feed" | "comment" | "user_posted";
 
 export interface SniffMessage {
   type: "SNIFFER_DATA";
