@@ -1,7 +1,7 @@
 {
   "name": "social-media-sniffer",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "社交媒体数据被动采集 Chrome 插件 — 只监听不伪造",
   "type": "module",
   "scripts": {
