@@ -6,19 +6,28 @@
 
 ## English
 
-A passive data collection Chrome extension for social media platforms.
+A passive data collection toolkit for social media platforms.
 
-While you browse social media normally, the extension silently intercepts API responses from the page itself and parses them into structured data — **no signature forgery, no extra requests, no login simulation**. Pure passive listening.
+While you browse social media normally, the Chrome extension silently intercepts API responses from the page itself and parses them into structured data — **no signature forgery, no extra requests, no login simulation**. Pure passive listening.
+
+### Project Structure
+
+```
+social-media-sniffer/
+├── extension/          # Chrome extension (MV3 + React + TypeScript)
+├── skill/              # CatDesk / Claude skill for data analysis (planned)
+├── desktop/            # macOS desktop app (planned)
+└── README.md
+```
 
 ### Currently Supported
 
 **Xiaohongshu / RedNote (xiaohongshu.com)**
 
 - Explore feed notes
-- Blogger profile pages (auto-grouped by blogger)
+- Blogger profile pages (auto-grouped by blogger, with per-user selection & export)
 - Note detail pages (images + video)
 - Comments
-- Creator center (creator.xiaohongshu.com) personal note data
 
 ### Safety Principles
 
@@ -43,35 +52,16 @@ Service worker (parse + merge into storage)
 Side panel UI (React)
 ```
 
-Why main world injection? Chrome extension content scripts run in an isolated world and cannot intercept the page's own fetch/XHR calls. So we inject an interception script into the main world via a `<script>` tag, then relay data back to the content script bridge through `postMessage`.
-
-### Usage
-
-#### Build from Source
+### Quick Start
 
 ```bash
 git clone https://github.com/Amateur0x1/social-media-sniffer.git
-cd social-media-sniffer
+cd social-media-sniffer/extension
 npm install
 npm run build
 ```
 
-#### Load into Chrome
-
-1. Open `chrome://extensions`
-2. Enable "Developer mode" (top right)
-3. Click "Load unpacked" and select the `dist/` directory
-4. Browse Xiaohongshu normally, click the extension icon to open the side panel
-
-#### Side Panel
-
-The side panel has three tabs:
-
-- **Explore** — Notes collected while browsing the explore/discover feed
-- **Bloggers** — Data collected from blogger profile pages, grouped by blogger with drill-down
-- **My Notes** — Your own note data collected from the creator center
-
-Each note has a checkbox. Use the "Export Selected" button at the bottom to export chosen notes and comments as a JSON file.
+Then load the `extension/dist/` folder in `chrome://extensions` (Developer Mode → Load Unpacked).
 
 ### Tech Stack
 
@@ -82,8 +72,9 @@ Each note has a checkbox. Use the "Export Selected" button at the bottom to expo
 
 ### Roadmap
 
+- [ ] Companion skill for data analysis (cheat-on-content integration)
+- [ ] macOS desktop app for real-time data persistence
 - [ ] Bilibili (bilibili.com) support
-- [ ] Local daemon for real-time file persistence (WebSocket / Native Messaging)
 - [ ] More export formats (CSV, Excel)
 - [ ] Data analytics dashboard
 
@@ -95,23 +86,32 @@ MIT
 
 ## 中文
 
-社交媒体数据被动采集 Chrome 扩展。
+社交媒体数据被动采集工具集。
 
-正常浏览社交媒体时，扩展在后台拦截页面自身的 API 响应并解析存储——**不伪造签名、不发额外请求、不模拟登录**，纯被动监听。
+正常浏览社交媒体时，Chrome 扩展在后台拦截页面自身的 API 响应并解析存储——**不伪造签名、不发额外请求、不模拟登录**，纯被动监听。
+
+### 项目结构
+
+```
+social-media-sniffer/
+├── extension/          # Chrome 扩展 (MV3 + React + TypeScript)
+├── skill/              # CatDesk / Claude 技能，用于数据分析 (计划中)
+├── desktop/            # macOS 桌面应用 (计划中)
+└── README.md
+```
 
 ### 目前支持
 
 **小红书 (xiaohongshu.com)**
 
 - 发现页 feed 流笔记
-- 博主主页笔记列表（自动按博主分组）
+- 博主主页笔记列表（自动按博主分组，支持按博主勾选和导出）
 - 笔记详情页（图文 + 视频）
 - 评论数据
-- 创作者中心（creator.xiaohongshu.com）自有笔记数据
 
 ### 安全原则
 
-这个扩展的核心设计约束是"只读"：
+这个工具集的核心设计约束是"只读"：
 
 - 不逆向任何签名算法（X-s, X-t 等）
 - 不构造或发送任何 API 请求
@@ -132,35 +132,16 @@ service worker (数据解析 + 合并存储)
 side panel UI (React)
 ```
 
-为什么需要 main world 注入？Chrome 扩展的 content script 运行在 isolated world，无法拦截页面自身的 fetch/XHR。所以通过 `<script>` 标签将拦截脚本注入到 main world，再通过 `postMessage` 把数据传回 content script 桥接层。
-
-### 使用
-
-#### 从源码构建
+### 快速开始
 
 ```bash
 git clone https://github.com/Amateur0x1/social-media-sniffer.git
-cd social-media-sniffer
+cd social-media-sniffer/extension
 npm install
 npm run build
 ```
 
-#### 加载到 Chrome
-
-1. 打开 `chrome://extensions`
-2. 开启右上角「开发者模式」
-3. 点击「加载已解压的扩展程序」，选择项目的 `dist/` 目录
-4. 正常浏览小红书，点击扩展图标打开侧边栏查看采集到的数据
-
-#### 侧边栏功能
-
-侧边栏分三个 tab：
-
-- **发现** — 浏览发现页时自动采集到的笔记
-- **博主** — 浏览博主主页时采集的数据，按博主分组，点击可展开查看该博主下的所有笔记
-- **我的** — 在创作者中心采集到的自己的笔记数据
-
-每条笔记可以勾选，底部「导出选中」按钮将选中的笔记和评论导出为 JSON 文件。
+然后在 `chrome://extensions` 中加载 `extension/dist/` 目录（开发者模式 → 加载已解压的扩展程序）。
 
 ### 技术栈
 
@@ -171,8 +152,9 @@ npm run build
 
 ### Roadmap
 
+- [ ] 配套 skill 做数据分析（对接 cheat-on-content）
+- [ ] macOS 桌面应用实时落盘
 - [ ] B 站 (bilibili.com) 支持
-- [ ] 本地 daemon 实时落盘（WebSocket / Native Messaging）
 - [ ] 更多导出格式（CSV、Excel）
 - [ ] 数据统计面板
 
