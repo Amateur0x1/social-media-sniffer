@@ -7,7 +7,7 @@ description: 社交媒体内容选题生产助手。通过多轮对话深入了�
 
 ## 工作目录
 
-从 `~/.social-media-sniffer/config.json`（Windows: `%USERPROFILE%\.social-media-sniffer\config.json`）读取 `workspace` 字段获取工作目录路径。如果配置不存在，提示用户先运行 init Skill。
+从 `~/.social-media-sniffer/config.json`（Windows: `%USERPROFILE%\.social-media-sniffer\config.json`）读取 `workspace` 字段获取工作目录路径。如果配置不存在，提示用户先完成初始化（参考项目根目录 agent.md）。
 
 以下所有 `<workspace>` 均指该路径。
 

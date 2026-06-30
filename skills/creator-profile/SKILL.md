@@ -21,7 +21,7 @@ description: 内容创作者画像建立与维护工具。通过多轮对话了�
 
 跨平台：macOS/Linux 为 `~/.social-media-sniffer/config.json`，Windows 为 `%USERPROFILE%\.social-media-sniffer\config.json`。
 
-**启动时必须先读取 config.json 获取 workspace 路径。如果配置不存在，提示用户先运行 init Skill。**
+**启动时必须先读取 config.json 获取 workspace 路径。如果配置不存在，提示用户先完成初始化（参考项目根目录 agent.md）。**
 
 ## 文件结构
 
