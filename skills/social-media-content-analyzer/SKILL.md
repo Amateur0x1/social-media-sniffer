@@ -71,6 +71,103 @@ which ffmpeg && which whisper
 
 如果用户指定了别的路径，以用户为准。
 
+## 任务状态与断点续传
+
+分析任务可能耗时较长（视频下载、截帧、whisper 转写），过程中可能被中断（对话断开、用户离开、进入新上下文等）。通过 `status.json` 记录进度，支持下次进来时从断点继续。
+
+### status.json 位置
+
+每个分析任务目录下都有一个：
+
+```
+<workspace>/analysis/<对象名>/<日期>/status.json
+```
+
+### status.json 格式
+
+```json
+{
+  "task_id": "竞品-cato/2026-06-29",
+  "source_file": "/Users/xxx/Downloads/xhs-user-2026-06-29.json",
+  "target_account": "煮理人",
+  "status": "in_progress",
+  "started_at": "2026-06-29T10:00:00Z",
+  "updated_at": "2026-06-29T10:15:00Z",
+  "total_notes": 45,
+  "progress": {
+    "videos": {
+      "total": 3,
+      "completed": ["68e8c1cb000000000703393c", "67dc1521000000001d0396ae"],
+      "failed": [],
+      "pending": ["66e59ef5000000001e01baf4"]
+    },
+    "images": {
+      "total": 42,
+      "completed": 32,
+      "failed": 0,
+      "pending": 10
+    },
+    "report": "not_started"
+  },
+  "error_log": []
+}
+```
+
+字段说明：
+- `status`：`in_progress` | `completed` | `failed` | `paused`
+- `target_account`：分析结果服务于哪个账号（可为空，表示通用分析）
+- `progress.videos.completed`：已完成的 note_id 列表
+- `progress.videos.failed`：失败的 note_id 列表（URL 过期等）
+- `progress.images.completed`：已下载的图文笔记数量
+- `progress.report`：`not_started` | `in_progress` | `completed`
+- `error_log`：记录失败原因，方便排查
+
+### 工作流程中的状态管理
+
+**启动分析时**：
+1. 检查目标目录下是否已有 `status.json`
+2. 如果有且 `status` 为 `in_progress` → 问用户「上次分析还没完成，要继续吗？」
+   - 用户说继续 → 从 `pending` 列表继续处理
+   - 用户说重新来 → 清空目录，重新开始
+3. 如果没有 → 创建新的 `status.json`，开始任务
+
+**处理每个笔记后**：
+- 更新 `status.json` 中对应的 completed/failed 列表
+- 更新 `updated_at` 时间戳
+- 这样即使中途断开，下次进来也知道做到哪了
+
+**单个笔记处理失败时**：
+- 将该 note_id 移入 `failed` 列表
+- 在 `error_log` 中记录失败原因（如 URL 过期、网络超时）
+- 继续处理下一个，不要因为一个失败而中断整个任务
+
+**全部完成时**：
+- 将 `status` 改为 `completed`
+- 如果有 failed 的笔记，提示用户哪些没成功、可能的原因
+
+### 进入新上下文时的恢复流程
+
+当用户在新对话中触发 content-analyzer Skill 时：
+
+1. 扫描 `<workspace>/analysis/` 下所有目录的 `status.json`
+2. 如果发现有 `status: "in_progress"` 的任务：
+   ```
+   我发现你之前有一个未完成的分析任务：
+   - 对象：竞品-cato
+   - 进度：视频 2/3 完成，图片 32/42 完成
+   - 上次更新：2026-06-29 10:15
+   
+   要继续这个任务，还是开始新的分析？
+   ```
+3. 用户选择继续 → 从断点恢复
+4. 用户选择放弃 → 将 status 标记为 `paused`，开始新任务
+
+### 注意事项
+
+- status.json 更新要及时，每处理完一个笔记就写一次，不要攒到最后批量写
+- 如果 source_file（原始 JSON）的路径已经不存在了（比如用户删了），从 status.json 中无法恢复原始数据，需要提示用户重新提供
+- 视频 URL 有时效性，如果中断时间太长（超过几小时），pending 中的视频 URL 可能已过期，需要用户重新抓取数据
+
 ## 工作流程
 
 ### Step 1：读取 JSON 数据
