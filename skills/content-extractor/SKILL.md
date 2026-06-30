@@ -1,5 +1,5 @@
 ---
-name: social-media-content-analyzer
+name: content-extractor
 description: 社交媒体内容数据提取工具。从 JSON 数据文件中读取笔记/帖子信息，对视频类内容自动下载、每秒截帧、提取音频并用 whisper 转为文字，对图文类内容批量下载配图。只负责数据提取和结构化存储，不做内容分析和策略判断。当用户提到"提取内容""下载视频""截帧""提取文案""下载图片""处理这个JSON""把数据拉下来"，或者提供了 sniffer 抓取的 JSON 数据文件需要提取素材时使用。
 ---
 
@@ -19,15 +19,32 @@ description: 社交媒体内容数据提取工具。从 JSON 数据文件中读�
 
 ## 前置依赖
 
+- `Python 3.8+`：所有脚本均为 Python，跨平台运行
 - `ffmpeg`：视频处理（截帧、提取音频）
 - `whisper`：语音转文字（openai-whisper CLI）
 
-运行前确认环境：
+### 环境预检
+
+首次使用时运行预检脚本，自动检测依赖是否就绪：
+
 ```bash
-which ffmpeg && which whisper
+python scripts/preflight.py
 ```
 
-Windows 下用 `where ffmpeg` 和 `where whisper`。
+如果有缺失，加 `--install` 尝试自动安装：
+
+```bash
+python scripts/preflight.py --install
+```
+
+预检脚本会：
+1. 检测当前平台（macOS / Linux / Windows）
+2. 检查 ffmpeg 和 whisper 是否可用
+3. 如果缺失且使用了 `--install`，尝试自动安装：
+   - macOS: `brew install ffmpeg` + `pip install openai-whisper`
+   - Windows: `winget install ffmpeg` 或 `choco install ffmpeg` + `pip install openai-whisper`
+   - Linux: `apt-get install ffmpeg` + `pip install openai-whisper`
+4. 安装失败则给出手动安装指引
 
 ## 工作目录
 
@@ -121,7 +138,7 @@ Windows 下用 `where ffmpeg` 和 `where whisper`。
 
 使用脚本：
 ```bash
-bash scripts/analyze_video.sh <video_url> <output_dir> [note_id]
+python scripts/extract_video.py <video_url> <output_dir> --note-id <note_id>
 ```
 
 ### Step 5：图文提取
@@ -134,7 +151,7 @@ bash scripts/analyze_video.sh <video_url> <output_dir> [note_id]
 
 使用脚本：
 ```bash
-bash scripts/download_images.sh <output_dir> <url1> <url2> ...
+python scripts/download_images.py <output_dir> <url1> <url2> ...
 ```
 
 ### Step 6：完成
@@ -191,4 +208,5 @@ bash scripts/download_images.sh <output_dir> <url1> <url2> ...
 - 视频下载和 whisper 转写耗时较长，处理前告知用户预计时间
 - whisper 默认用 `base` 模型（速度快），用户需要更准确可切 `medium` 或 `large`
 - 视频 URL 有时效签名，过期后无法下载，需用户重新抓取
-- Windows 下 shell 脚本不可用，改用 Python 调用 ffmpeg/whisper
+- 所有脚本均为 Python，macOS/Linux/Windows 通用，无需额外适配
+- 首次使用务必先运行 `python scripts/preflight.py` 预检环境

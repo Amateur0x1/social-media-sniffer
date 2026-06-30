@@ -1,6 +1,6 @@
 ---
 name: init
-description: 社交媒体内容工作流初始化工具。引导用户完成首次设置：选择工作目录、创建目录结构、生成配置文件。所有其他 Skill（creator-profile、content-analyzer、topic-creator）依赖此初始化后的配置。当用户首次使用、说"初始化""init""开始设置""我要开始用"，或者其他 Skill 检测到配置文件不存在时触发。
+description: 社交媒体内容工作流初始化工具。引导用户完成首次设置：选择工作目录、创建目录结构、生成配置文件。所有其他 Skill（creator-profile、content-extractor、topic-creator）依赖此初始化后的配置。当用户首次使用、说"初始化""init""开始设置""我要开始用"，或者其他 Skill 检测到配置文件不存在时触发。
 ---
 
 # 社交媒体内容工作流 - 初始化

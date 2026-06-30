@@ -172,7 +172,7 @@ description: 内容创作者画像建立与维护工具。通过多轮对话了�
 
 ### 场景五：被其他 Skill 调用
 
-当 `social-media-topic-creator` 或 `social-media-content-analyzer` 需要了解用户信息时：
+当 `social-media-topic-creator` 或 `content-extractor` 需要了解用户信息时：
 
 1. 检查 `<workspace>/profiles/` 是否存在
 2. 如果不存在 → 引导用户先建立画像
@@ -185,7 +185,7 @@ description: 内容创作者画像建立与维护工具。通过多轮对话了�
 当用户提供了自己某个账号的发布数据（JSON）时：
 
 1. 确认这个数据属于哪个账号
-2. 用 `social-media-content-analyzer` 的能力进行分析（视频截帧+转写、图片下载）
+2. 用 `content-extractor` 的能力进行分析（视频截帧+转写、图片下载）
 3. 将分析结论（风格总结、数据表现、问题和改进方向）写入该账号画像的「已有内容分析」部分
 4. 分析产出（截帧、图片等）存放在 `<workspace>/analysis/<日期>-<账号名>/`
 
