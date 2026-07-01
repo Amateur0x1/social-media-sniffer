@@ -13,34 +13,26 @@ description: 内容创作者画像建立与维护工具。通过多轮对话了�
 
 ## 工作目录
 
-所有文件存放在用户通过 `init` Skill 配置的工作目录下。路径从配置文件读取：
+从 `~/.social-media-sniffer/config.json` 读取 `active` workspace 路径：
 
 ```
-~/.social-media-sniffer/config.json → "workspace" 字段
+config.workspaces[config.active] → 当前 workspace 路径
 ```
 
-跨平台：macOS/Linux 为 `~/.social-media-sniffer/config.json`，Windows 为 `%USERPROFILE%\.social-media-sniffer\config.json`。
+**启动时必须先读取 config.json 获取 active workspace。如果配置不存在，提示用户先完成初始化（参考项目根目录 agent.md）。**
 
-**启动时必须先读取 config.json 获取 workspace 路径。如果配置不存在，提示用户先完成初始化（参考项目根目录 agent.md）。**
+多 workspace 架构下，一个 workspace = 一个账号。本 skill 操作的是当前 active workspace 的画像文件。
 
 ## 文件结构
 
 ```
 <workspace>/
-├── profiles/                          # 所有账号画像
-│   ├── _index.md                      # 账号索引（列出所有账号及简介）
-│   ├── 煮理人.md                       # 账号1的画像
-│   ├── 个人技术号.md                    # 账号2的画像
-│   └── xxx公司官方号.md                 # 账号3的画像
+├── profiles/
+│   └── <账号名>.md              # 本 skill 维护的画像
 ├── data/
 ├── analysis/
-└── topics/
+└── ...
 ```
-
-**关键设计**：
-- 每个账号一个 `.md` 文件，文件名就是账号名/产品名（用户自己取）
-- `_index.md` 是索引文件，快速查看所有账号及当前状态
-- 其他 Skill 使用时，需要先确认「当前在为哪个账号工作」
 
 ## 索引文件格式（_index.md）
 
