@@ -140,6 +140,6 @@ description: 发布 T+3 天后回收真实数据，对比盲预测，结构化�
 ## 与其他 skill 的关系
 
 - **上游**：blind-predict 的预测文件是 retro 的输入
-- **下游**：观察累积后 → rubric-evolve 升级公式；评论数据累积后 → audience-lens 更新受众画像
+- **下游**：观察累积后 → rubric-evolve 升级公式；评论数据累积后 → creator-profile 数据面更新受众画像
 - **数据来源**：浏览器插件（social-media-sniffer extension）导出的 JSON
 - **回馈**：复盘结论影响下一次选题（topic-creator）和打分（draft-score）

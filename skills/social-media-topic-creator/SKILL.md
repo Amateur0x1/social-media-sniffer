@@ -54,7 +54,7 @@ AI："[方向] 太广。最近你接触到的什么具体事件/对话/经历让
   ↓
 AI 从三个数据源找灵感：
 1. trend-scout 的 candidates 池里有没有未做的高分候选
-2. audience-lens 显示受众最近什么情绪/身份特征被激活
+2. creator-profile 数据面显示受众最近什么情绪/身份特征被激活
 3. 已发内容中什么维度 over-perform → 能不能"再做一次"（换场景/换角度）
   ↓
 提议 1 个角度（不是 5 个）→ 用户认可 → 展开
@@ -142,7 +142,7 @@ composite ≈ 6.6（中等偏上）
 
 ```
 creator-profile（你是谁）
-audience-lens（谁在看你）         → 选题方向的约束 + 灵感
+creator-profile 数据面（谁在看你）→ 选题方向的约束 + 灵感
 benchmark-import（对标 pattern）
 
 trend-scout → 热点候选输入

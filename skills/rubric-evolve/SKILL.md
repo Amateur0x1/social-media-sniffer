@@ -113,4 +113,4 @@ rubric 文件是"当前生效规则"，不是历史博物馆——读者打开�
 - **上游**：post-retro 积累观察 → 触发 rubric-evolve
 - **下游**：升级后的 rubric 被 draft-score、blind-predict 使用
 - **回溯**：升级后不重写历史预测文件，但在预测 header 标注"基于 vN 公式"
-- **联动**：audience-lens 的发现可以作为升级的辅助证据（"受众其实不在乎 NA"）
+- **联动**：creator-profile 数据面的发现可以作为升级的辅助证据（"受众其实不在乎 NA"）
