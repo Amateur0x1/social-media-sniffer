@@ -6,10 +6,9 @@ import {
   type NoteEntry,
   type NoteCard,
 } from "./store/sniffer-store";
+import type { PlatformKey } from "./types/common";
 
 // ── 平台定义 ──
-
-type PlatformKey = "xhs" | "bilibili" | "douyin";
 
 interface PlatformDef {
   key: PlatformKey;
@@ -22,8 +21,8 @@ interface PlatformDef {
 
 const PLATFORMS: PlatformDef[] = [
   { key: "xhs", label: "小红书", icon: "/platform-xhs.png", color: "#ff6b6b", enabled: true },
-  { key: "bilibili", label: "B站", icon: "📺", color: "#00a1d6", enabled: false },
-  { key: "douyin", label: "抖音", icon: "🎵", color: "#111", enabled: false },
+  { key: "bilibili", label: "B站", icon: "📺", color: "#00a1d6", enabled: true },
+  { key: "douyin", label: "抖音", icon: "🎵", color: "#111", enabled: true },
 ];
 
 /** 判断 icon 是图片路径还是 emoji */
@@ -47,25 +46,28 @@ function App() {
 
   const refresh = useCallback(async () => {
     try {
-      const d = await loadData();
+      const d = await loadData(platform);
       setData(d);
     } catch (err) {
       console.error("加载数据失败:", err);
     }
-  }, []);
+  }, [platform]);
 
   useEffect(() => {
     const port = chrome.runtime.connect({ name: "sidepanel" });
     refresh();
-    const listener = (msg: { type?: string }) => {
-      if (msg.type === "SNIFFER_UPDATED") refresh();
+    const listener = (msg: { type?: string; platform?: PlatformKey }) => {
+      if (msg.type === "SNIFFER_UPDATED") {
+        // 只在当前平台的数据更新时刷新，或未指定平台时总是刷新
+        if (!msg.platform || msg.platform === platform) refresh();
+      }
     };
     chrome.runtime.onMessage.addListener(listener);
     return () => {
       port.disconnect();
       chrome.runtime.onMessage.removeListener(listener);
     };
-  }, [refresh]);
+  }, [refresh, platform]);
 
   // ── 按 tab 分类笔记 ──
 
@@ -246,8 +248,8 @@ function App() {
   }
 
   const handleClear = useCallback(async () => {
-    if (!confirm("确定清空所有采集数据？")) return;
-    await clearData();
+    if (!confirm(`确定清空 ${activePlatform.label} 的所有采集数据？`)) return;
+    await clearData(platform);
     setSelected(new Set());
     setSelectedUsers(new Set());
     setExpandedUser(null);
@@ -271,7 +273,14 @@ function App() {
                 } : {}),
                 ...(p.enabled ? {} : S.platformBtnDisabled),
               }}
-              onClick={() => p.enabled && setPlatform(p.key)}
+              onClick={() => {
+                if (!p.enabled || p.key === platform) return;
+                setPlatform(p.key);
+                setSelected(new Set());
+                setSelectedUsers(new Set());
+                setExpandedUser(null);
+                setTab("explore");
+              }}
               disabled={!p.enabled}
             >
               {isImageIcon(p.icon)
@@ -341,7 +350,7 @@ function App() {
         <div style={S.listContainer}>
           {tab === "explore" && (
             exploreNotes.length === 0 ? (
-              <EmptyState text={`浏览${activePlatform.label}发现页时自动采集`} />
+              <EmptyState text={`浏览${activePlatform.label}时自动采集`} />
             ) : (
               exploreNotes.map((note) => (
                 <NoteItem
@@ -514,7 +523,9 @@ function NoteItem({
   const coverUrl = hasImages
     ? note.images.find((u) => u)
     : note.video?.first_frame_fileid
-      ? `https://sns-img-bd.xhscdn.com/${note.video.first_frame_fileid}`
+      ? (note.video.first_frame_fileid.startsWith("http")
+          ? note.video.first_frame_fileid
+          : `https://sns-img-bd.xhscdn.com/${note.video.first_frame_fileid}`)
       : undefined;
 
   return (

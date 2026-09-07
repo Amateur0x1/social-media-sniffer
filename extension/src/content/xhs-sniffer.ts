@@ -7,7 +7,7 @@
 
 /// <reference types="chrome" />
 
-import type { SniffMessage } from "../types/xhs-api";
+import type { SniffMessage } from "../types/common";
 
 // ── 注入 main world 脚本 ──
 
@@ -30,6 +30,7 @@ window.addEventListener("message", (event) => {
 
   const msg: SniffMessage = {
     type: "SNIFFER_DATA",
+    platform: "xhs",
     source,
     payload,
     url,

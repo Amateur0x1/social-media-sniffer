@@ -185,16 +185,5 @@ export interface WebV1UserPostedResponse {
   };
 }
 
-// ── 内部消息 ──
-
-export type SniffSource = "feed" | "comment" | "user_posted";
-
-export interface SniffMessage {
-  type: "SNIFFER_DATA";
-  source: SniffSource;
-  payload: unknown;
-  url: string;
-  /** 发起请求的页面 URL，用于判断来源场景 */
-  pageUrl: string;
-  timestamp: number;
-}
+// ── 内部消息（已迁移到 common.ts） ──
+export type { SniffSource, SniffMessage, PlatformKey } from "./common";

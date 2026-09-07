@@ -1,13 +1,13 @@
 /**
- * 被动嗅探数据存储。
+ * 被动嗅探数据存储 — 多平台版。
  *
  * 设计原则：只存数据，不发请求。
  * 所有数据都来自页面自己发的 API 响应，通过 content script 监听后存入这里。
  *
- * 两个数据来源：
- * 1. explore — 发现页浏览到的笔记（研究竞品内容）
- * 2. user — 特定博主主页的笔记（研究对标博主，按博主分组）
+ * 每个平台有独立的 storage key，数据结构复用同一套接口。
  */
+
+import type { PlatformKey } from "../types/common";
 
 // ── 页面来源类型 ──
 
@@ -15,12 +15,12 @@
 export type PageContext =
   | { page: "explore" }
   | { page: "user"; user_id: string; user_name?: string }
-  | { page: "note_detail" }; // 笔记详情页 /explore/{note_id}
+  | { page: "note_detail" }; // 笔记/视频详情页
 
 // ── 类型定义 ──
 
 export interface VideoDetail {
-  /** 视频流 URL（优先取 h264 最高画质） */
+  /** 视频流 URL（优先取最高画质） */
   video_url?: string;
   /** 所有可用的视频流 URL */
   video_urls?: string[];
@@ -40,7 +40,7 @@ export interface NoteEntry {
   note_id: string;
   title: string;
   desc: string;
-  type: string; // "video" | "normal"
+  type: string; // "video" | "normal" | "image"
   time: number;
   ip_location: string;
   like_count: number;
@@ -57,6 +57,8 @@ export interface NoteEntry {
   source: "explore" | "user" | "note_detail";
   /** user 来源时，所属博主的 user_id */
   source_user_id?: string;
+  /** 所属平台（冗余存储便于导出） */
+  platform?: PlatformKey;
 }
 
 export interface CommentEntry {
@@ -124,26 +126,37 @@ function emptyData(): SnifferData {
   };
 }
 
-// ── Storage key ──
+// ── Storage key — 每个平台独立 ──
 
-const STORAGE_KEY = "cheat_sniffer_data";
+const STORAGE_KEYS: Record<PlatformKey, string> = {
+  xhs: "cheat_sniffer_data",
+  bilibili: "cheat_sniffer_data_bili",
+  douyin: "cheat_sniffer_data_dy",
+};
+
+function getStorageKey(platform: PlatformKey): string {
+  return STORAGE_KEYS[platform];
+}
 
 // ── 读写 chrome.storage.local ──
 
-export async function loadData(): Promise<SnifferData> {
-  const result = await chrome.storage.local.get(STORAGE_KEY);
-  const data = (result[STORAGE_KEY] as SnifferData) ?? emptyData();
+export async function loadData(platform: PlatformKey = "xhs"): Promise<SnifferData> {
+  const key = getStorageKey(platform);
+  const result = await chrome.storage.local.get(key);
+  const data = (result[key] as SnifferData) ?? emptyData();
   // 兼容旧数据：如果没有 userProfiles 字段就补上
   if (!data.userProfiles) data.userProfiles = {};
   return data;
 }
 
-export async function saveData(data: SnifferData): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEY]: data });
+export async function saveData(data: SnifferData, platform: PlatformKey = "xhs"): Promise<void> {
+  const key = getStorageKey(platform);
+  await chrome.storage.local.set({ [key]: data });
 }
 
-export async function clearData(): Promise<void> {
-  await chrome.storage.local.set({ [STORAGE_KEY]: emptyData() });
+export async function clearData(platform: PlatformKey = "xhs"): Promise<void> {
+  const key = getStorageKey(platform);
+  await chrome.storage.local.set({ [key]: emptyData() });
 }
 
 // ── 辅助：安全转数字 ──
@@ -156,25 +169,74 @@ export function toInt(v: unknown): number {
 
 // ── 页面 URL → PageContext 解析 ──
 
-export function parsePageContext(url: string): PageContext {
+/** 小红书 URL 解析 */
+export function parseXhsPageContext(url: string): PageContext {
   try {
     const u = new URL(url);
-
-    // /user/profile/{user_id}
     const userMatch = u.pathname.match(/^\/user\/profile\/([a-f0-9]+)/);
     if (userMatch) {
       return { page: "user", user_id: userMatch[1] };
     }
-
-    // /explore/{note_id} — 具体笔记详情页
     const noteMatch = u.pathname.match(/^\/explore\/([a-f0-9]+)/);
     if (noteMatch) {
       return { page: "note_detail" };
     }
-
-    // /explore 或其他 www.xiaohongshu.com 页面
     return { page: "explore" };
   } catch {
     return { page: "explore" };
+  }
+}
+
+/** B站 URL 解析 */
+export function parseBiliPageContext(url: string): PageContext {
+  try {
+    const u = new URL(url);
+    // /space/{mid} 或 /space/{mid}/video 等
+    const spaceMatch = u.pathname.match(/^\/space\/(\d+)/);
+    if (spaceMatch) {
+      return { page: "user", user_id: spaceMatch[1] };
+    }
+    // /video/{bvid} 视频详情
+    const videoMatch = u.pathname.match(/^\/video\/(BV[\w]+)/i);
+    if (videoMatch) {
+      return { page: "note_detail" };
+    }
+    return { page: "explore" };
+  } catch {
+    return { page: "explore" };
+  }
+}
+
+/** 抖音 URL 解析 */
+export function parseDyPageContext(url: string): PageContext {
+  try {
+    const u = new URL(url);
+    // /user/{sec_uid}
+    const userMatch = u.pathname.match(/^\/user\/(MS4w[\w-]+|[\w-]{10,})/);
+    if (userMatch) {
+      return { page: "user", user_id: userMatch[1] };
+    }
+    // /video/{id} 或 /note/{id}
+    const videoMatch = u.pathname.match(/^\/(video|note)\/(\d+)/);
+    if (videoMatch) {
+      return { page: "note_detail" };
+    }
+    return { page: "explore" };
+  } catch {
+    return { page: "explore" };
+  }
+}
+
+/** 统一入口：根据平台选择解析器 */
+export function parsePageContext(url: string, platform: PlatformKey = "xhs"): PageContext {
+  switch (platform) {
+    case "xhs":
+      return parseXhsPageContext(url);
+    case "bilibili":
+      return parseBiliPageContext(url);
+    case "douyin":
+      return parseDyPageContext(url);
+    default:
+      return { page: "explore" };
   }
 }
