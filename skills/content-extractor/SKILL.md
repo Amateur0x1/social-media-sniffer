@@ -143,6 +143,30 @@ python scripts/preflight.py --install
 python scripts/extract_video.py <video_url> <output_dir> --note-id <note_id>
 ```
 
+也可直接传入扩展导出的 JSON，自动读取视频地址、音轨及 Referer：
+
+```bash
+python scripts/extract_video.py <export.json> <output_dir> --note-id <note_id> --download-only
+```
+
+单条视频可省略 `--note-id`；省略 `--download-only` 会继续截帧和转写。
+
+B站支持页面链接（包括 b23.tv），由 yt-dlp 下载并合并音视频，需先安装 `python -m pip install -U yt-dlp`，并确保 ffmpeg 可用：
+
+```bash
+python scripts/extract_video.py 'https://www.bilibili.com/video/BV...' <output_dir>
+```
+
+B站优先使用导出的 `video.page_url`（保留 `?p=N` 分P参数）；旧 JSON 可用 `https://www.bilibili.com/video/<note_id>`。需要登录时追加 `--cookies-from-browser chrome`，仅在用户授权读取浏览器登录状态后使用。
+
+使用嗅探得到的 DASH 直链时，必须同时传入音轨和 Referer：
+
+```bash
+python scripts/extract_video.py '<video_url>' <output_dir> --audio-url '<audio_url>' --referer '<page_url>'
+```
+
+播放地址有时效，需打开视频并播放后采集；失效时重新采集或使用页面链接下载。多段视频使用页面链接以保证下载完整。
+
 ### Step 5：图文提取
 
 对每个图文笔记：

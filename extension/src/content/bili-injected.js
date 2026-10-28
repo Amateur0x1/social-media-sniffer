@@ -12,6 +12,9 @@
 
   // B站 API 路径列表（注意带 wbi/ 前缀的是签名版接口）
   var API_PATTERNS = [
+    { key: "bili_playurl", path: "/x/player/wbi/playurl" },
+    { key: "bili_playurl", path: "/x/player/playurl" },
+    { key: "bili_video_detail", path: "/x/web-interface/view" },
     { key: "bili_rcmd", path: "/x/web-interface/wbi/index/top/feed/rcmd" },
     { key: "bili_popular", path: "/x/web-interface/popular" },
     { key: "bili_video_detail", path: "/x/web-interface/wbi/view/detail" },
@@ -226,7 +229,7 @@
         source: source,
         payload: trimmed,
         url: apiUrl,
-        pageUrl: contextUrl,
+        pageUrl: source === "bili_playurl" ? window.location.href : contextUrl,
       },
       "*"
     );
@@ -298,6 +301,21 @@
     });
     return originalXhrSend.apply(this, arguments);
   };
+
+  // 首屏播放信息通常由服务端内嵌，不一定产生可拦截请求。
+  function captureInitialState() {
+    var state = window.__INITIAL_STATE__;
+    if (state && state.videoData) {
+      forward("bili_video_detail", { code: 0, data: state.videoData }, window.location.href);
+    }
+    var play = window.__playinfo__;
+    if (play && play.code === 0) forward("bili_playurl", play, window.location.href);
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", captureInitialState, { once: true });
+  } else {
+    captureInitialState();
+  }
 
   // 初始化上下文
   updateContext();

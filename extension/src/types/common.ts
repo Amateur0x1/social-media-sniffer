@@ -15,6 +15,7 @@ export type SniffSource =
   | "comment"
   | "user_posted"
   // B站
+  | "bili_playurl"
   | "bili_rcmd"
   | "bili_popular"
   | "bili_video_detail"

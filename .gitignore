@@ -2,3 +2,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 .DS_Store
+
+# Local extracted media and Python cache
+output/
+__pycache__/
+*.pyc

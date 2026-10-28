@@ -56,6 +56,9 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
+// 按接收顺序写入，避免详情和播放响应并发覆盖。
+let sniffQueue: Promise<void> = Promise.resolve();
+
 // ── 消息处理 ──
 
 chrome.runtime.onMessage.addListener(
@@ -65,7 +68,8 @@ chrome.runtime.onMessage.addListener(
       return;
     }
 
-    handleSniffData(message)
+    sniffQueue = sniffQueue.catch(() => {}).then(() => handleSniffData(message));
+    sniffQueue
       .then(() => sendResponse({ ok: true }))
       .catch((err) => {
         console.error("[SM Sniffer] 处理数据失败:", err);
@@ -281,6 +285,9 @@ function handleBilibili(
   ctx: PageContext
 ): void {
   switch (msg.source) {
+    case "bili_playurl":
+      mergeBiliPlayurl(data, payload, msg);
+      break;
     case "bili_rcmd":
       mergeBiliRcmd(data, payload);
       break;
@@ -297,6 +304,34 @@ function handleBilibili(
       mergeBiliUserVideo(data, payload, ctx);
       break;
   }
+}
+
+/** 仅消费页面已请求的播放信息，不主动调用 B站 API。 */
+function mergeBiliPlayurl(data: SnifferData, raw: Record<string, unknown>, msg: SniffMessage): void {
+  if (raw.code !== 0) return;
+  const params = new URL(msg.url).searchParams;
+  const bvid = params.get("bvid") || /\/video\/(BV[\w]+)/i.exec(msg.pageUrl)?.[1];
+  if (!bvid) return;
+  const play = raw.data as { dash?: { video?: Array<{ baseUrl?: string; base_url?: string; bandwidth?: number; width?: number; height?: number }>; audio?: Array<{ baseUrl?: string; base_url?: string; bandwidth?: number }> }; durl?: Array<{ url: string }>; timelength?: number } | undefined;
+  if (!play) return;
+  const video = [...(play.dash?.video || [])].sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))[0];
+  const audio = [...(play.dash?.audio || [])].sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0))[0];
+  // 多段 durl 用页面链接交给下载器完整合并，避免只导出第一段。
+  const url = video?.baseUrl || video?.base_url || (play.durl?.length === 1 ? play.durl[0].url : undefined);
+  const entry = data.notes[bvid] || biliVideoToNote({ bvid }, "note_detail");
+  if (!entry) return;
+  const pageUrl = msg.pageUrl;
+  entry.video = {
+    ...entry.video,
+    page_url: pageUrl,
+    referer: pageUrl,
+    video_url: url,
+    audio_url: audio?.baseUrl || audio?.base_url,
+    width: video?.width,
+    height: video?.height,
+    duration: play.timelength ? play.timelength / 1000 : entry.video?.duration,
+  };
+  data.notes[bvid] = entry;
 }
 
 /** 将一个 B站视频对象转换为 NoteEntry（热门/推荐/详情页共用） */
@@ -326,6 +361,7 @@ function biliVideoToNote(
     tags: [],
     images: (v.pic as string) ? [v.pic as string] : [],
     video: {
+      page_url: `https://www.bilibili.com/video/${bvid}`,
       duration: v.duration as number | undefined,
     },
     author: (owner?.name as string) || undefined,
@@ -351,7 +387,7 @@ function mergeBiliRcmd(data: SnifferData, raw: Record<string, unknown>): void {
     const v = item as Record<string, unknown>;
     const entry = biliVideoToNote(v, "explore");
     if (entry) {
-      data.notes[entry.note_id] = entry;
+      data.notes[entry.note_id] = { ...entry, video: { ...entry.video, ...data.notes[entry.note_id]?.video } };
     }
   }
 }
@@ -367,7 +403,7 @@ function mergeBiliPopular(data: SnifferData, raw: Record<string, unknown>): void
   for (const item of list) {
     const entry = biliVideoToNote(item as Record<string, unknown>, "explore");
     if (entry) {
-      data.notes[entry.note_id] = entry;
+      data.notes[entry.note_id] = { ...entry, video: { ...entry.video, ...data.notes[entry.note_id]?.video } };
     }
   }
 }
@@ -389,7 +425,7 @@ function mergeBiliVideoDetail(data: SnifferData, raw: Record<string, unknown>, c
   const entry = biliVideoToNote(v, source, sourceUserId);
   if (!entry) return;
 
-  data.notes[entry.note_id] = entry;
+  data.notes[entry.note_id] = { ...entry, video: { ...entry.video, ...data.notes[entry.note_id]?.video } };
 
   if (ctx.page === "user") {
     const owner = v.owner as Record<string, unknown> | undefined;

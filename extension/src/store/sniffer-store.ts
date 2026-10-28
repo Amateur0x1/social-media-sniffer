@@ -20,6 +20,9 @@ export type PageContext =
 // ── 类型定义 ──
 
 export interface VideoDetail {
+  page_url?: string;
+  audio_url?: string;
+  referer?: string;
   /** 视频流 URL（优先取最高画质） */
   video_url?: string;
   /** 所有可用的视频流 URL */
