@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback, useMemo } from "react";
 import {
   loadData,
-  clearData,
   type SnifferData,
   type NoteEntry,
   type NoteCard,
@@ -114,11 +113,6 @@ function App() {
     }).sort((a, b) => b.total - a.total);
   }, [data, userNotes, userCards]);
 
-  // 统计
-  const commentCount = data
-    ? Object.values(data.comments).reduce((acc, arr) => acc + arr.length, 0)
-    : 0;
-
   // ── 选中逻辑 ──
   // explore tab: 选中笔记 note_id
   // user tab 博主列表: 选中博主 user_id
@@ -139,6 +133,12 @@ function App() {
   const currentUserIds = useMemo(() => {
     return userGroups.map((g) => g.user_id);
   }, [userGroups]);
+
+  // 只统计当前视图内笔记的评论，避免切 tab 时数字对不上
+  const commentCount = useMemo(() => {
+    if (!data) return 0;
+    return currentNoteIds.reduce((acc, id) => acc + (data.comments[id]?.length ?? 0), 0);
+  }, [data, currentNoteIds]);
 
   const allSelected = isUserListMode
     ? currentUserIds.length > 0 && currentUserIds.every((id) => selectedUsers.has(id))
@@ -249,12 +249,13 @@ function App() {
 
   const handleClear = useCallback(async () => {
     if (!confirm(`确定清空 ${activePlatform.label} 的所有采集数据？`)) return;
-    await clearData(platform);
+    // 清空必须经过 service worker：它持有进程内缓存，直接改 storage 会让缓存残留旧数据
+    await chrome.runtime.sendMessage({ type: "SNIFFER_CLEAR", platform });
     setSelected(new Set());
     setSelectedUsers(new Set());
     setExpandedUser(null);
-    refresh();
-  }, [refresh]);
+    await refresh();
+  }, [activePlatform.label, platform, refresh]);
 
   return (
     <div style={S.root}>

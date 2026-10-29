@@ -22,29 +22,42 @@
 
   // ── 上下文 URL 追踪 ──
 
+  // 从主页点进笔记时，只让「第一条」笔记继承主页上下文。
+  // 之后再从这篇笔记跳到别人的笔记（相关推荐），就不会被错记到原博主名下。
   var contextUrl = window.location.href;
+  var pendingUserContext = isUserProfileUrl(contextUrl) ? contextUrl : null;
 
   function isUserProfileUrl(url) {
     return /\/user\/profile\/[a-f0-9]+/.test(url);
   }
 
   function isNoteDetailUrl(url) {
-    return /\/explore\/[a-f0-9]+/.test(url);
+    return /\/(?:explore|discovery\/item)\/[a-f0-9]+/.test(url);
   }
 
   function updateContext() {
     var currentUrl = window.location.href;
 
     if (isUserProfileUrl(currentUrl)) {
-      // 进入博主主页，记住上下文
+      // 进入博主主页，记住上下文，并允许下一篇笔记继承一次
       contextUrl = currentUrl;
-    } else if (isNoteDetailUrl(currentUrl) && isUserProfileUrl(contextUrl)) {
-      // 从博主主页点进笔记详情，保持博主上下文不变
-      // contextUrl 不更新
-    } else {
-      // 其他情况（发现页、搜索页等），更新为当前 URL
-      contextUrl = currentUrl;
+      pendingUserContext = currentUrl;
+      return;
     }
+
+    if (isNoteDetailUrl(currentUrl)) {
+      if (pendingUserContext) {
+        contextUrl = pendingUserContext;
+        pendingUserContext = null; // 一次性消费
+      } else {
+        contextUrl = currentUrl;
+      }
+      return;
+    }
+
+    // 发现页、搜索页等：重置上下文
+    contextUrl = currentUrl;
+    pendingUserContext = null;
   }
 
   // 监听 SPA 路由变化

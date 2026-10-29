@@ -1,10 +1,12 @@
 import { defineManifest } from "@crxjs/vite-plugin";
+import pkg from "./package.json";
 
 export default defineManifest({
   manifest_version: 3,
   name: "社媒数据助手 (被动采集)",
   short_name: "SM Sniffer",
-  version: "0.3.1",
+  // 版本号只在 package.json 维护，避免两处手写不同步
+  version: pkg.version,
   description: "被动拦截社交媒体 API 响应，零风险采集内容数据。支持小红书、B站、抖音。",
   icons: {
     "16": "public/icon16.png",
@@ -22,7 +24,9 @@ export default defineManifest({
   side_panel: {
     default_path: "index.html",
   },
-  permissions: ["sidePanel", "storage", "activeTab", "tabs"],
+  // unlimitedStorage：评论 + 笔记分片后总量会超过 storage.local 默认的 10MB。
+  // 只保留实际用到的权限，tabs / activeTab 代码里并未调用。
+  permissions: ["sidePanel", "storage", "unlimitedStorage"],
   background: {
     service_worker: "src/service_worker.ts",
   },

@@ -3,9 +3,16 @@
  *
  * 接收来自各平台 content script 的 SNIFFER_DATA 消息，
  * 根据 platform 字段路由到对应的处理器，
- * 解析后合并写入 chrome.storage.local（每个平台独立 key）。
+ * 解析后以「分片 + 增量」的方式写入 chrome.storage.local。
  *
  * 设计原则：只聚合数据，不发任何网络请求。
+ *
+ * ## 写入策略
+ *
+ * 解析在内存里完成（getData 带进程内缓存，service worker 被回收后自动重建），
+ * 处理过程中用 Tx 记录哪几篇笔记 / 哪几篇评论 / meta 真的变了，
+ * 最后只落盘这些切片。相比 v1 的「每条消息全量读 + 全量写」，
+ * 大账号数据量下的写入成本从 O(笔记数) 降到 O(本次变更数)。
  */
 
 /// <reference types="chrome" />
@@ -16,12 +23,15 @@ import type {
   CommentEntry,
   NoteCard,
   SnifferData,
+  UserProfile,
   VideoDetail,
   PageContext,
+  SnifferChange,
 } from "./store/sniffer-store";
 import {
   loadData,
-  saveData,
+  saveChanges,
+  clearData,
   toInt,
   parsePageContext,
 } from "./store/sniffer-store";
@@ -56,20 +66,128 @@ chrome.runtime.onConnect.addListener((port) => {
   }
 });
 
+// ── 进程内数据缓存 ──
+//
+// 所有写入都经过 service worker，所以缓存与 storage 始终一致；
+// service worker 被浏览器回收时缓存一起消失，下次消息会重新从 storage 重建。
+
+const dataCache = new Map<PlatformKey, SnifferData>();
+
+async function getData(platform: PlatformKey): Promise<SnifferData> {
+  const cached = dataCache.get(platform);
+  if (cached) return cached;
+
+  const data = await loadData(platform);
+  dataCache.set(platform, data);
+  return data;
+}
+
+// ── 变更追踪 ──
+//
+// 处理函数只负责在内存里改 SnifferData，同时用 Tx 标脏；
+// 落盘时只写被标脏的切片。
+
+class Tx {
+  private readonly notes = new Set<string>();
+  private readonly comments = new Set<string>();
+  private readonly removedComments = new Set<string>();
+  private cards = false;
+  private meta = false;
+
+  note(noteId: string): void {
+    this.notes.add(noteId);
+  }
+
+  comment(noteId: string): void {
+    this.comments.add(noteId);
+  }
+
+  dropComment(noteId: string): void {
+    this.comments.delete(noteId);
+    this.removedComments.add(noteId);
+  }
+
+  card(): void {
+    this.cards = true;
+  }
+
+  stats(): void {
+    this.meta = true;
+  }
+
+  profile(): void {
+    this.meta = true;
+  }
+
+  toChange(data: SnifferData): SnifferChange {
+    const change: SnifferChange = {};
+
+    if (this.notes.size > 0) {
+      change.notes = [...this.notes]
+        .map((id) => data.notes[id])
+        .filter((note): note is NoteEntry => Boolean(note));
+    }
+
+    if (this.comments.size > 0) {
+      change.comments = [...this.comments].map((id) => ({
+        noteId: id,
+        entries: data.comments[id] ?? [],
+      }));
+    }
+
+    if (this.removedComments.size > 0) {
+      change.removedComments = [...this.removedComments];
+    }
+
+    if (this.cards) change.noteCards = data.noteCards;
+    if (this.meta) change.meta = { stats: data.stats, userProfiles: data.userProfiles };
+
+    return change;
+  }
+}
+
 // 按接收顺序写入，避免详情和播放响应并发覆盖。
 let sniffQueue: Promise<void> = Promise.resolve();
 
+function enqueue(task: () => Promise<void>): Promise<void> {
+  sniffQueue = sniffQueue.catch(() => {}).then(task);
+  return sniffQueue;
+}
+
+function notifyPanel(platform: PlatformKey): void {
+  try {
+    chrome.runtime.sendMessage({ type: "SNIFFER_UPDATED", platform });
+  } catch {
+    /* side panel 可能没打开 */
+  }
+}
+
 // ── 消息处理 ──
 
+type ControlMessage = { type: "SNIFFER_CLEAR"; platform: PlatformKey };
+
 chrome.runtime.onMessage.addListener(
-  (message: SniffMessage, _sender, sendResponse) => {
+  (message: SniffMessage | ControlMessage, _sender, sendResponse) => {
+    if (message.type === "SNIFFER_CLEAR") {
+      enqueue(async () => {
+        dataCache.delete(message.platform);
+        await clearData(message.platform);
+        notifyPanel(message.platform);
+      })
+        .then(() => sendResponse({ ok: true }))
+        .catch((err) => {
+          console.error("[SM Sniffer] 清空数据失败:", err);
+          sendResponse({ ok: false, reason: String(err) });
+        });
+      return true;
+    }
+
     if (message.type !== "SNIFFER_DATA") {
       sendResponse({ ok: false, reason: "unknown message type" });
       return;
     }
 
-    sniffQueue = sniffQueue.catch(() => {}).then(() => handleSniffData(message));
-    sniffQueue
+    enqueue(() => handleSniffData(message))
       .then(() => sendResponse({ ok: true }))
       .catch((err) => {
         console.error("[SM Sniffer] 处理数据失败:", err);
@@ -81,31 +199,31 @@ chrome.runtime.onMessage.addListener(
 );
 
 async function handleSniffData(msg: SniffMessage): Promise<void> {
-  const platform = msg.platform || "xhs"; // 兼容旧版消息
-  const data = await loadData(platform);
+  const platform: PlatformKey = msg.platform || "xhs"; // 兼容旧版消息
+  const data = await getData(platform);
   const payload = msg.payload as Record<string, unknown>;
   const ctx = parsePageContext(msg.pageUrl, platform);
-
-  console.log("[SM Sniffer]", platform, "页面来源:", ctx.page, msg.source, msg.pageUrl);
+  const tx = new Tx();
 
   switch (platform) {
     case "xhs":
-      handleXhs(data, msg, payload, ctx);
+      handleXhs(data, msg, payload, ctx, tx);
       break;
     case "bilibili":
-      handleBilibili(data, msg, payload, ctx);
+      handleBilibili(data, msg, payload, ctx, tx);
       break;
     case "douyin":
-      handleDouyin(data, msg, payload, ctx);
+      handleDouyin(data, msg, payload, ctx, tx);
       break;
   }
 
-  await saveData(data, platform);
+  const change = tx.toChange(data);
+  if (Object.keys(change).length === 0) return; // 没有任何变化，不必写盘也不必刷新面板
 
-  // 通知 side panel 刷新
-  try {
-    chrome.runtime.sendMessage({ type: "SNIFFER_UPDATED", platform });
-  } catch { /* side panel 可能没打开 */ }
+  await saveChanges(platform, change);
+
+  // 落盘成功后才广播，避免面板读到半写状态
+  notifyPanel(platform);
 }
 
 // ═══════════════════════════════════════════
@@ -116,7 +234,8 @@ function handleXhs(
   data: SnifferData,
   msg: SniffMessage,
   payload: Record<string, unknown>,
-  ctx: PageContext
+  ctx: PageContext,
+  tx: Tx
 ): void {
   // user_posted API 一定来自 user 页面
   if (msg.source === "user_posted" && ctx.page !== "user") {
@@ -128,19 +247,20 @@ function handleXhs(
 
   switch (msg.source) {
     case "feed":
-      mergeXhsFeed(data, payload, ctx);
+      mergeXhsFeed(data, payload, ctx, tx);
       break;
     case "comment":
-      mergeXhsComments(data, payload);
+      mergeXhsComments(data, payload, tx);
       break;
     case "user_posted":
-      mergeXhsUserPosted(data, payload, ctx);
+      mergeXhsUserPosted(data, payload, ctx, tx);
       break;
   }
 }
 
-function mergeXhsFeed(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext): void {
+function mergeXhsFeed(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext, tx: Tx): void {
   data.stats.feedRequests++;
+  tx.stats();
 
   const items = (raw as { data?: { items?: unknown[] } }).data?.items;
   if (!Array.isArray(items)) return;
@@ -167,7 +287,11 @@ function mergeXhsFeed(data: SnifferData, raw: Record<string, unknown>, ctx: Page
       videoDetail = extractXhsVideo(videoObj);
     }
 
-    const entry: NoteEntry = {
+    const images = (imageList ?? [])
+      .map((img) => extractImageUrl(img))
+      .filter((url): url is string => Boolean(url));
+
+    data.notes[noteId] = {
       note_id: noteId,
       title: (card.title as string) || "",
       desc: (card.desc as string) || "",
@@ -179,7 +303,7 @@ function mergeXhsFeed(data: SnifferData, raw: Record<string, unknown>, ctx: Page
       comment_count: toInt(interact?.comment_count),
       share_count: toInt(interact?.share_count),
       tags: tagList?.map((t) => t.name) ?? [],
-      images: imageList?.map((img) => extractImageUrl(img)).filter(Boolean) as string[] ?? [],
+      images,
       video: videoDetail,
       author: (user?.nickname as string) || undefined,
       author_id: (user?.user_id as string) || undefined,
@@ -187,17 +311,17 @@ function mergeXhsFeed(data: SnifferData, raw: Record<string, unknown>, ctx: Page
       source_user_id: ctx.page === "user" ? ctx.user_id : undefined,
       platform: "xhs",
     };
-
-    data.notes[noteId] = entry;
+    tx.note(noteId);
 
     if (ctx.page === "user" && user) {
-      updateUserProfile(data, ctx.user_id, (user.nickname as string) || "");
+      updateUserProfile(data, ctx.user_id, (user.nickname as string) || "", tx);
     }
   }
 }
 
-function mergeXhsComments(data: SnifferData, raw: Record<string, unknown>): void {
+function mergeXhsComments(data: SnifferData, raw: Record<string, unknown>, tx: Tx): void {
   data.stats.commentRequests++;
+  tx.stats();
 
   const comments = (raw as { data?: { comments?: unknown[] } }).data?.comments;
   if (!Array.isArray(comments)) return;
@@ -226,12 +350,14 @@ function mergeXhsComments(data: SnifferData, raw: Record<string, unknown>): void
     const existing = data.comments[noteId];
     if (!existing.some((e) => e.cid === cid)) {
       existing.push(entry);
+      tx.comment(noteId);
     }
   }
 }
 
-function mergeXhsUserPosted(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext): void {
+function mergeXhsUserPosted(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext, tx: Tx): void {
   data.stats.userPostedRequests++;
+  tx.stats();
 
   const notes = (raw as { data?: { notes?: unknown[] } }).data?.notes;
   if (!Array.isArray(notes)) return;
@@ -254,7 +380,7 @@ function mergeXhsUserPosted(data: SnifferData, raw: Record<string, unknown>, ctx
       title: (note.display_title as string) || "",
       type: (note.type as string) || "normal",
       liked_count: toInt(interact?.liked_count),
-      cover_url: cover ? (extractImageUrl(cover as Record<string, unknown>) || "") : "",
+      cover_url: cover ? (extractImageUrl(cover) || "") : "",
       author: (user?.nickname as string) || (user?.nick_name as string) || undefined,
       author_id: (user?.user_id as string) || undefined,
       source_user_id: sourceUserId,
@@ -262,13 +388,15 @@ function mergeXhsUserPosted(data: SnifferData, raw: Record<string, unknown>, ctx
 
     if (!data.noteCards.some((c) => c.note_id === noteId)) {
       data.noteCards.push(card);
+      tx.card();
     }
 
     if (ctx.page === "user" && user) {
       updateUserProfile(
         data,
         ctx.user_id,
-        (user.nickname as string) || (user.nick_name as string) || ""
+        (user.nickname as string) || (user.nick_name as string) || "",
+        tx
       );
     }
   }
@@ -282,32 +410,33 @@ function handleBilibili(
   data: SnifferData,
   msg: SniffMessage,
   payload: Record<string, unknown>,
-  ctx: PageContext
+  ctx: PageContext,
+  tx: Tx
 ): void {
   switch (msg.source) {
     case "bili_playurl":
-      mergeBiliPlayurl(data, payload, msg);
+      mergeBiliPlayurl(data, payload, msg, tx);
       break;
     case "bili_rcmd":
-      mergeBiliRcmd(data, payload);
+      mergeBiliRcmd(data, payload, tx);
       break;
     case "bili_popular":
-      mergeBiliPopular(data, payload);
+      mergeBiliPopular(data, payload, tx);
       break;
     case "bili_video_detail":
-      mergeBiliVideoDetail(data, payload, ctx);
+      mergeBiliVideoDetail(data, payload, ctx, tx);
       break;
     case "bili_reply":
-      mergeBiliReply(data, payload, msg.url);
+      mergeBiliReply(data, payload, msg.url, tx);
       break;
     case "bili_user_video":
-      mergeBiliUserVideo(data, payload, ctx);
+      mergeBiliUserVideo(data, payload, ctx, tx);
       break;
   }
 }
 
 /** 仅消费页面已请求的播放信息，不主动调用 B站 API。 */
-function mergeBiliPlayurl(data: SnifferData, raw: Record<string, unknown>, msg: SniffMessage): void {
+function mergeBiliPlayurl(data: SnifferData, raw: Record<string, unknown>, msg: SniffMessage, tx: Tx): void {
   if (raw.code !== 0) return;
   const params = new URL(msg.url).searchParams;
   const bvid = params.get("bvid") || /\/video\/(BV[\w]+)/i.exec(msg.pageUrl)?.[1];
@@ -332,6 +461,7 @@ function mergeBiliPlayurl(data: SnifferData, raw: Record<string, unknown>, msg: 
     duration: play.timelength ? play.timelength / 1000 : entry.video?.duration,
   };
   data.notes[bvid] = entry;
+  tx.note(bvid);
 }
 
 /** 将一个 B站视频对象转换为 NoteEntry（热门/推荐/详情页共用） */
@@ -369,14 +499,67 @@ function biliVideoToNote(
     source,
     source_user_id: sourceUserId,
     platform: "bilibili",
-    // 存 aid 用于评论关联（挂在扩展字段上）
-    _bili_aid: aid,
-  } as NoteEntry & { _bili_aid?: number };
+    aid,
+  };
+}
+
+/**
+ * 写入 B站笔记并处理关联数据。
+ *
+ * 两件事：
+ * 1. 新旧数据合并 —— 新的统计字段优先，已有的视频直链 / 归属博主优先保留。
+ * 2. 孤儿评论回填 —— 评论接口只带 aid，如果评论先于详情到达，
+ *    会被临时挂在 `aid_<aid>` 上，这里把它迁回 bvid。
+ */
+function upsertBiliNote(data: SnifferData, entry: NoteEntry, tx: Tx): void {
+  const existing = data.notes[entry.note_id];
+  const aid = entry.aid ?? existing?.aid;
+
+  data.notes[entry.note_id] = {
+    ...existing,
+    ...entry,
+    aid,
+    // 从博主主页采集到的归属信息不应该被之后的信息流请求冲掉
+    source: entry.source_user_id ? entry.source : (existing?.source ?? entry.source),
+    source_user_id: entry.source_user_id ?? existing?.source_user_id,
+    images: entry.images.length > 0 ? entry.images : (existing?.images ?? []),
+    tags: entry.tags.length > 0 ? entry.tags : (existing?.tags ?? []),
+    video: { ...entry.video, ...existing?.video },
+  };
+
+  tx.note(entry.note_id);
+  adoptOrphanComments(data, entry.note_id, aid, tx);
+}
+
+/** 把先到达、暂时挂在 aid_ 伪 key 上的评论合并回 bvid */
+function adoptOrphanComments(
+  data: SnifferData,
+  bvid: string,
+  aid: number | undefined,
+  tx: Tx
+): void {
+  if (!aid) return;
+
+  const orphanKey = `aid_${aid}`;
+  const orphan = data.comments[orphanKey];
+  if (!orphan || orphan.length === 0) return;
+
+  const merged = data.comments[bvid] ?? [];
+  for (const comment of orphan) {
+    if (!merged.some((e) => e.cid === comment.cid)) merged.push(comment);
+  }
+
+  data.comments[bvid] = merged;
+  delete data.comments[orphanKey];
+
+  tx.comment(bvid);
+  tx.dropComment(orphanKey);
 }
 
 /** 首页推荐流 /x/web-interface/wbi/index/top/feed/rcmd */
-function mergeBiliRcmd(data: SnifferData, raw: Record<string, unknown>): void {
+function mergeBiliRcmd(data: SnifferData, raw: Record<string, unknown>, tx: Tx): void {
   data.stats.feedRequests++;
+  tx.stats();
 
   // 推荐流数据在 data.item 数组中
   const dataObj = raw.data as { item?: unknown[] } | undefined;
@@ -384,17 +567,15 @@ function mergeBiliRcmd(data: SnifferData, raw: Record<string, unknown>): void {
   if (!Array.isArray(items)) return;
 
   for (const item of items) {
-    const v = item as Record<string, unknown>;
-    const entry = biliVideoToNote(v, "explore");
-    if (entry) {
-      data.notes[entry.note_id] = { ...entry, video: { ...entry.video, ...data.notes[entry.note_id]?.video } };
-    }
+    const entry = biliVideoToNote(item as Record<string, unknown>, "explore");
+    if (entry) upsertBiliNote(data, entry, tx);
   }
 }
 
 /** 热门排行榜 /x/web-interface/popular */
-function mergeBiliPopular(data: SnifferData, raw: Record<string, unknown>): void {
+function mergeBiliPopular(data: SnifferData, raw: Record<string, unknown>, tx: Tx): void {
   data.stats.feedRequests++;
+  tx.stats();
 
   const dataObj = raw.data as { list?: unknown[] } | undefined;
   const list = dataObj?.list;
@@ -402,15 +583,14 @@ function mergeBiliPopular(data: SnifferData, raw: Record<string, unknown>): void
 
   for (const item of list) {
     const entry = biliVideoToNote(item as Record<string, unknown>, "explore");
-    if (entry) {
-      data.notes[entry.note_id] = { ...entry, video: { ...entry.video, ...data.notes[entry.note_id]?.video } };
-    }
+    if (entry) upsertBiliNote(data, entry, tx);
   }
 }
 
 /** 视频详情 /x/web-interface/wbi/view/detail — 数据嵌套在 data.View 中 */
-function mergeBiliVideoDetail(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext): void {
+function mergeBiliVideoDetail(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext, tx: Tx): void {
   data.stats.feedRequests++;
+  tx.stats();
 
   const dataObj = raw.data as Record<string, unknown> | undefined;
   if (!dataObj) return;
@@ -425,18 +605,19 @@ function mergeBiliVideoDetail(data: SnifferData, raw: Record<string, unknown>, c
   const entry = biliVideoToNote(v, source, sourceUserId);
   if (!entry) return;
 
-  data.notes[entry.note_id] = { ...entry, video: { ...entry.video, ...data.notes[entry.note_id]?.video } };
+  upsertBiliNote(data, entry, tx);
 
   if (ctx.page === "user") {
     const owner = v.owner as Record<string, unknown> | undefined;
     if (owner) {
-      updateUserProfile(data, ctx.user_id, (owner.name as string) || "");
+      updateUserProfile(data, ctx.user_id, (owner.name as string) || "", tx);
     }
   }
 }
 
-function mergeBiliReply(data: SnifferData, raw: Record<string, unknown>, apiUrl: string): void {
+function mergeBiliReply(data: SnifferData, raw: Record<string, unknown>, apiUrl: string, tx: Tx): void {
   data.stats.commentRequests++;
+  tx.stats();
 
   const dataObj = raw.data as { replies?: unknown[]; upper?: { mid?: number } } | undefined;
   const replies = dataObj?.replies;
@@ -448,7 +629,7 @@ function mergeBiliReply(data: SnifferData, raw: Record<string, unknown>, apiUrl:
   const oid = oidMatch ? oidMatch[1] : "";
   if (!oid) return;
 
-  // 在已有笔记中查找对应的 bvid
+  // 在已有笔记中查找对应的 bvid；找不到就先挂 aid_ 伪 key，等详情到达后回填
   const noteId = findBvidByAid(data, parseInt(oid, 10)) || `aid_${oid}`;
 
   for (const r of replies) {
@@ -476,12 +657,14 @@ function mergeBiliReply(data: SnifferData, raw: Record<string, unknown>, apiUrl:
     const existing = data.comments[noteId];
     if (!existing.some((e) => e.cid === entry.cid)) {
       existing.push(entry);
+      tx.comment(noteId);
     }
   }
 }
 
-function mergeBiliUserVideo(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext): void {
+function mergeBiliUserVideo(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext, tx: Tx): void {
   data.stats.userPostedRequests++;
+  tx.stats();
 
   const dataObj = raw.data as { list?: { vlist?: unknown[] } } | undefined;
   const vlist = dataObj?.list?.vlist;
@@ -494,24 +677,35 @@ function mergeBiliUserVideo(data: SnifferData, raw: Record<string, unknown>, ctx
     const bvid = item.bvid as string;
     if (!bvid) continue;
 
+    // arc/search 不返回点赞数，若之前从详情/信息流拿到过就复用
+    const known = data.notes[bvid];
+
     const card: NoteCard = {
       note_id: bvid,
       xsec_token: "",
       title: (item.title as string) || "",
       type: "video",
-      liked_count: 0, // user_video 接口不返回点赞数
+      liked_count: known?.like_count ?? 0,
       cover_url: (item.pic as string) || "",
       author: (item.author as string) || undefined,
       author_id: item.mid != null ? String(item.mid) : undefined,
       source_user_id: sourceUserId,
     };
 
-    if (!data.noteCards.some((c) => c.note_id === bvid)) {
+    const existingCard = data.noteCards.find((c) => c.note_id === bvid);
+    if (existingCard) {
+      Object.assign(existingCard, {
+        ...card,
+        liked_count: Math.max(existingCard.liked_count, card.liked_count),
+      });
+      tx.card();
+    } else {
       data.noteCards.push(card);
+      tx.card();
     }
 
     if (ctx.page === "user") {
-      updateUserProfile(data, ctx.user_id, (item.author as string) || "");
+      updateUserProfile(data, ctx.user_id, (item.author as string) || "", tx);
     }
   }
 }
@@ -519,11 +713,7 @@ function mergeBiliUserVideo(data: SnifferData, raw: Record<string, unknown>, ctx
 /** 通过 aid 在已采集的笔记中找到 bvid */
 function findBvidByAid(data: SnifferData, aid: number): string | undefined {
   for (const [bvid, note] of Object.entries(data.notes)) {
-    if (note.platform === "bilibili") {
-      // biliVideoToNote 中存了 _bili_aid
-      const noteAny = note as NoteEntry & { _bili_aid?: number };
-      if (noteAny._bili_aid === aid) return bvid;
-    }
+    if (note.platform === "bilibili" && note.aid === aid) return bvid;
   }
   return undefined;
 }
@@ -536,24 +726,24 @@ function handleDouyin(
   data: SnifferData,
   msg: SniffMessage,
   payload: Record<string, unknown>,
-  ctx: PageContext
+  ctx: PageContext,
+  tx: Tx
 ): void {
   switch (msg.source) {
     case "dy_recommend":
-      mergeDyRecommend(data, payload);
+      mergeDyRecommend(data, payload, tx);
       break;
     case "dy_video_detail":
-      mergeDyVideoDetail(data, payload, ctx);
+      mergeDyVideoDetail(data, payload, ctx, tx);
       break;
     case "dy_comment":
-      mergeDyComment(data, payload);
+      mergeDyComment(data, payload, tx);
       break;
     case "dy_user_post":
-    case "dy_user_post_ssr":
-      mergeDyUserPost(data, payload, ctx);
+      mergeDyUserPost(data, payload, ctx, tx);
       break;
     case "dy_user_profile":
-      mergeDyUserProfile(data, payload, ctx);
+      mergeDyUserProfile(data, payload, ctx, tx);
       break;
   }
 }
@@ -600,9 +790,6 @@ function parseDyAwemeToNote(
     if (cover?.url_list?.[0]) imageUrls.push(cover.url_list[0]);
   }
 
-  const avatarThumb = author?.avatar_thumb as { url_list?: string[] } | undefined;
-  void avatarThumb; // 暂不使用头像
-
   return {
     note_id: awemeId,
     title: (aweme.desc as string) || "",
@@ -614,7 +801,9 @@ function parseDyAwemeToNote(
     collect_count: toInt(stats?.collect_count),
     comment_count: toInt(stats?.comment_count),
     share_count: toInt(stats?.share_count),
-    tags: textExtra?.map((t) => t.hashtag_name).filter(Boolean) as string[] ?? [],
+    tags: (textExtra ?? [])
+      .map((t) => t.hashtag_name)
+      .filter((name): name is string => Boolean(name)),
     images: imageUrls,
     video: videoDetail,
     author: (author?.nickname as string) || undefined,
@@ -625,8 +814,9 @@ function parseDyAwemeToNote(
   };
 }
 
-function mergeDyRecommend(data: SnifferData, raw: Record<string, unknown>): void {
+function mergeDyRecommend(data: SnifferData, raw: Record<string, unknown>, tx: Tx): void {
   data.stats.feedRequests++;
+  tx.stats();
 
   const awemeList = raw.aweme_list as unknown[] | undefined;
   if (!Array.isArray(awemeList)) return;
@@ -635,12 +825,14 @@ function mergeDyRecommend(data: SnifferData, raw: Record<string, unknown>): void
     const entry = parseDyAwemeToNote(item as Record<string, unknown>, "explore");
     if (entry) {
       data.notes[entry.note_id] = entry;
+      tx.note(entry.note_id);
     }
   }
 }
 
-function mergeDyVideoDetail(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext): void {
+function mergeDyVideoDetail(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext, tx: Tx): void {
   data.stats.feedRequests++;
+  tx.stats();
 
   const aweme = raw.aweme_detail as Record<string, unknown> | undefined;
   if (!aweme) return;
@@ -649,20 +841,29 @@ function mergeDyVideoDetail(data: SnifferData, raw: Record<string, unknown>, ctx
   const sourceUserId = ctx.page === "user" ? ctx.user_id : undefined;
 
   const entry = parseDyAwemeToNote(aweme, source, sourceUserId);
-  if (entry) {
-    data.notes[entry.note_id] = entry;
+  if (!entry) return;
 
-    if (ctx.page === "user") {
-      const author = aweme.author as Record<string, unknown> | undefined;
-      if (author) {
-        updateUserProfile(data, ctx.user_id, (author.nickname as string) || "");
-      }
+  // 详情比信息流的字段更全，但博主归属以已采集到的为准
+  const existing = data.notes[entry.note_id];
+  data.notes[entry.note_id] = {
+    ...existing,
+    ...entry,
+    source: entry.source_user_id ? entry.source : (existing?.source ?? entry.source),
+    source_user_id: entry.source_user_id ?? existing?.source_user_id,
+  };
+  tx.note(entry.note_id);
+
+  if (ctx.page === "user") {
+    const author = aweme.author as Record<string, unknown> | undefined;
+    if (author) {
+      updateUserProfile(data, ctx.user_id, (author.nickname as string) || "", tx);
     }
   }
 }
 
-function mergeDyComment(data: SnifferData, raw: Record<string, unknown>): void {
+function mergeDyComment(data: SnifferData, raw: Record<string, unknown>, tx: Tx): void {
   data.stats.commentRequests++;
+  tx.stats();
 
   const comments = raw.comments as unknown[] | undefined;
   if (!Array.isArray(comments)) return;
@@ -691,12 +892,14 @@ function mergeDyComment(data: SnifferData, raw: Record<string, unknown>): void {
     const existing = data.comments[awemeId];
     if (!existing.some((e) => e.cid === cid)) {
       existing.push(entry);
+      tx.comment(awemeId);
     }
   }
 }
 
-function mergeDyUserPost(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext): void {
+function mergeDyUserPost(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext, tx: Tx): void {
   data.stats.userPostedRequests++;
+  tx.stats();
 
   const awemeList = raw.aweme_list as unknown[] | undefined;
   if (!Array.isArray(awemeList)) return;
@@ -725,18 +928,23 @@ function mergeDyUserPost(data: SnifferData, raw: Record<string, unknown>, ctx: P
       source_user_id: sourceUserId,
     };
 
-    if (!data.noteCards.some((c) => c.note_id === awemeId)) {
+    const existingCard = data.noteCards.find((c) => c.note_id === awemeId);
+    if (existingCard) {
+      Object.assign(existingCard, card);
+      tx.card();
+    } else {
       data.noteCards.push(card);
+      tx.card();
     }
 
     if (ctx.page === "user" && author) {
-      updateUserProfile(data, ctx.user_id, (author.nickname as string) || "");
+      updateUserProfile(data, ctx.user_id, (author.nickname as string) || "", tx);
     }
   }
 }
 
 /** 用户主页信息 /aweme/v1/web/user/profile/other */
-function mergeDyUserProfile(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext): void {
+function mergeDyUserProfile(data: SnifferData, raw: Record<string, unknown>, ctx: PageContext, tx: Tx): void {
   const user = raw.user as Record<string, unknown> | undefined;
   if (!user) return;
 
@@ -745,7 +953,16 @@ function mergeDyUserProfile(data: SnifferData, raw: Record<string, unknown>, ctx
   const userId = secUid || (ctx.page === "user" ? ctx.user_id : "");
   if (!userId) return;
 
-  updateUserProfile(data, userId, nickname);
+  const avatar = user.avatar_thumb as { url_list?: string[] } | undefined;
+
+  updateUserProfile(data, userId, nickname, tx, {
+    avatar: avatar?.url_list?.[0],
+    signature: (user.signature as string) || undefined,
+    follower_count: (user.follower_count as number) || undefined,
+    following_count: (user.following_count as number) || undefined,
+    total_favorited: (user.total_favorited as number) || undefined,
+    platform: "douyin",
+  });
 }
 
 // ═══════════════════════════════════════════
@@ -754,24 +971,43 @@ function mergeDyUserProfile(data: SnifferData, raw: Record<string, unknown>, ctx
 
 // ── 博主 Profile 更新 ──
 
-function updateUserProfile(data: SnifferData, userId: string, userName: string): void {
-  if (!data.userProfiles[userId]) {
+function updateUserProfile(
+  data: SnifferData,
+  userId: string,
+  userName: string,
+  tx: Tx,
+  extras?: Partial<UserProfile>
+): void {
+  const profile = data.userProfiles[userId];
+
+  if (!profile) {
     data.userProfiles[userId] = {
       user_id: userId,
       user_name: userName || userId,
       note_count: 0,
       first_seen: Date.now(),
+      ...extras,
     };
+  } else {
+    if (userName) profile.user_name = userName;
+    if (extras) {
+      for (const [key, value] of Object.entries(extras)) {
+        if (value !== undefined && value !== "") {
+          (profile as unknown as Record<string, unknown>)[key] = value;
+        }
+      }
+    }
   }
-  if (userName) {
-    data.userProfiles[userId].user_name = userName;
-  }
+
   const count = Object.values(data.notes).filter(
     (n) => n.source_user_id === userId
   ).length + data.noteCards.filter(
     (c) => c.source_user_id === userId
   ).length;
+
   data.userProfiles[userId].note_count = count;
+  data.userProfiles[userId].updated_at = Date.now();
+  tx.profile();
 }
 
 // ── 小红书视频数据提取 ──

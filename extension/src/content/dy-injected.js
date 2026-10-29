@@ -159,7 +159,9 @@
 
   // ── 上下文 URL 追踪 ──
 
+  // 从主页点进视频时，只让「第一条」视频继承主页上下文，避免推荐流串作者
   var contextUrl = window.location.href;
+  var pendingUserContext = isUserPageUrl(contextUrl) ? contextUrl : null;
 
   function isUserPageUrl(url) {
     return /\/user\/[\w-]+/.test(url);
@@ -174,11 +176,22 @@
 
     if (isUserPageUrl(currentUrl)) {
       contextUrl = currentUrl;
-    } else if (isVideoDetailUrl(currentUrl) && isUserPageUrl(contextUrl)) {
-      // 从用户主页点进视频详情，保持用户上下文
-    } else {
-      contextUrl = currentUrl;
+      pendingUserContext = currentUrl;
+      return;
     }
+
+    if (isVideoDetailUrl(currentUrl)) {
+      if (pendingUserContext) {
+        contextUrl = pendingUserContext;
+        pendingUserContext = null; // 一次性消费
+      } else {
+        contextUrl = currentUrl;
+      }
+      return;
+    }
+
+    contextUrl = currentUrl;
+    pendingUserContext = null;
   }
 
   var originalPushState = history.pushState;

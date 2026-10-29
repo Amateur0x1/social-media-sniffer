@@ -26,7 +26,6 @@ export type SniffSource =
   | "dy_video_detail"
   | "dy_comment"
   | "dy_user_post"
-  | "dy_user_post_ssr"
   | "dy_user_profile";
 
 // ── Content Script → Service Worker 通用消息 ──

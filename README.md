@@ -15,9 +15,15 @@ While you browse social media normally, the Chrome extension silently intercepts
 ```
 social-media-sniffer/
 ├── extension/          # Chrome extension (MV3 + React + TypeScript)
-├── skill/              # CatDesk / Claude skill for data analysis (planned)
-├── desktop/            # macOS desktop app (planned)
-└── README.md
+│   └── src/
+│       ├── content/    # Content-script bridges + main-world interceptors
+│       ├── store/      # Sharded storage layer
+│       ├── types/      # Shared message protocol
+│       ├── service_worker.ts
+│       └── App.tsx     # Side panel UI
+├── rubrics/            # Scoring rubrics (7 dimensions)
+├── skills/             # CatDesk / Claude skills for the content workflow
+└── output/             # Local extracted media (gitignored)
 ```
 
 ### Currently Supported
@@ -29,11 +35,23 @@ social-media-sniffer/
 - Note detail pages (images + video)
 - Comments
 
+**Bilibili (bilibili.com)**
+
+- Home recommendation feed, popular ranking, video detail
+- Creator space pages (`space.bilibili.com/{mid}`, `www.bilibili.com/space/{mid}`)
+- Comments, plus play URLs (DASH video/audio) for downloads
+
+**Douyin (douyin.com)**
+
+- Recommend feed, video / note detail
+- Creator profiles and their post lists (API + SSR `RENDER_DATA`)
+- Comments and profile stats (followers, likes, signature)
+
 ### Safety Principles
 
 The core design constraint is "read-only":
 
-- No reverse-engineering of any signature algorithms (X-s, X-t, etc.)
+- No reverse-engineering of any signature algorithms (X-s, X-t, wbi, etc.)
 - No API requests constructed or sent
 - No cookies / tokens injected into requests
 - 100% of data comes from responses to requests the browser itself made
@@ -48,9 +66,23 @@ Page main world (fetch/XHR monkey-patch)
 Content script bridge (isolated world)
     ↓ chrome.runtime.sendMessage
 Service worker (parse + merge into storage)
-    ↓ chrome.storage.local
+    ↓ chrome.storage.local (sharded)
 Side panel UI (React)
 ```
+
+Storage is sharded per note so a single intercepted response never rewrites the
+whole dataset:
+
+```
+sms:<platform>:meta               { stats, userProfiles }
+sms:<platform>:cards              NoteCard[]
+sms:<platform>:note:<note_id>     NoteEntry
+sms:<platform>:comment:<note_id>  CommentEntry[]
+```
+
+The service worker keeps an in-process cache and writes only the shards that
+actually changed. Data created by v0.3.x (single key per platform) is migrated
+automatically on first read.
 
 ### Quick Start
 
@@ -72,11 +104,10 @@ Then load the `extension/dist/` folder in `chrome://extensions` (Developer Mode 
 
 ### Roadmap
 
-- [ ] Companion skill for data analysis (cheat-on-content integration)
-- [ ] macOS desktop app for real-time data persistence
-- [ ] Bilibili (bilibili.com) support
+- [ ] Second-level comments (Bilibili nested replies, XHS sub-comments)
 - [ ] More export formats (CSV, Excel)
 - [ ] Data analytics dashboard
+- [ ] macOS desktop app for real-time persistence
 
 ### License
 
@@ -95,9 +126,15 @@ MIT
 ```
 social-media-sniffer/
 ├── extension/          # Chrome 扩展 (MV3 + React + TypeScript)
-├── skill/              # CatDesk / Claude 技能，用于数据分析 (计划中)
-├── desktop/            # macOS 桌面应用 (计划中)
-└── README.md
+│   └── src/
+│       ├── content/    # content script 桥接层 + main world 拦截脚本
+│       ├── store/      # 分片存储层
+│       ├── types/      # 跨平台消息协议
+│       ├── service_worker.ts
+│       └── App.tsx     # 侧边栏 UI
+├── rubrics/            # 评分规则（7 维度）
+├── skills/             # 内容运营工作流 Skill
+└── output/             # 本地提取的素材（已 gitignore）
 ```
 
 ### 目前支持
@@ -109,11 +146,23 @@ social-media-sniffer/
 - 笔记详情页（图文 + 视频）
 - 评论数据
 
+**B站 (bilibili.com)**
+
+- 首页推荐流、热门排行榜、视频详情
+- 博主空间页（`space.bilibili.com/{mid}` 与 `www.bilibili.com/space/{mid}` 两种形态）
+- 评论数据，以及用于下载的 DASH 音视频直链
+
+**抖音 (douyin.com)**
+
+- 推荐流、视频/图文详情
+- 博主主页与其作品列表（API + 首屏 SSR `RENDER_DATA`）
+- 评论数据与主页画像字段（粉丝数、获赞数、签名等）
+
 ### 安全原则
 
 这个工具集的核心设计约束是"只读"：
 
-- 不逆向任何签名算法（X-s, X-t 等）
+- 不逆向任何签名算法（X-s、X-t、wbi 等）
 - 不构造或发送任何 API 请求
 - 不注入 cookie / token 到请求中
 - 所有数据 100% 来自浏览器本身发出的请求的响应
@@ -128,9 +177,20 @@ social-media-sniffer/
 content script 桥接层 (isolated world)
     ↓ chrome.runtime.sendMessage
 service worker (数据解析 + 合并存储)
-    ↓ chrome.storage.local
+    ↓ chrome.storage.local（分片）
 side panel UI (React)
 ```
+
+存储按笔记分片，单条响应不会触发整库重写：
+
+```
+sms:<platform>:meta               { stats, userProfiles }
+sms:<platform>:cards              NoteCard[]
+sms:<platform>:note:<note_id>     NoteEntry
+sms:<platform>:comment:<note_id>  CommentEntry[]
+```
+
+service worker 持有进程内缓存，只回写真正变化的分片。v0.3.x 的单 key 数据会在首次读取时自动迁移。
 
 ### 快速开始
 
@@ -152,11 +212,10 @@ npm run build
 
 ### Roadmap
 
-- [ ] 配套 skill 做数据分析（对接 cheat-on-content）
-- [ ] macOS 桌面应用实时落盘
-- [ ] B 站 (bilibili.com) 支持
+- [ ] 二级评论采集（B站楼中楼、小红书子评论）
 - [ ] 更多导出格式（CSV、Excel）
 - [ ] 数据统计面板
+- [ ] macOS 桌面应用实时落盘
 
 ### License
 

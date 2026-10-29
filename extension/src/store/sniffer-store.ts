@@ -1,10 +1,25 @@
 /**
- * 被动嗅探数据存储 — 多平台版。
+ * 被动嗅探数据存储 — 多平台版 v2。
  *
  * 设计原则：只存数据，不发请求。
  * 所有数据都来自页面自己发的 API 响应，通过 content script 监听后存入这里。
  *
- * 每个平台有独立的 storage key，数据结构复用同一套接口。
+ * ## 为什么分片
+ *
+ * v1 把整个平台的数据塞进一个 storage key，每收到一条响应就要把
+ * 全部笔记 + 评论读出来再整块写回去。笔记上千条之后：
+ *   1. 单次写入是 O(n) 的序列化，刷新一次信息流能卡住 service worker；
+ *   2. chrome.storage.local 默认只有 10MB，写超配额会抛 QUOTA_BYTES，
+ *      旧的错误处理只是 console.error，用户侧看起来一切正常但数据全丢。
+ *
+ * v2 拆成按 note_id 分片的 key，一次写入只碰真正变化的切片：
+ *
+ *   sms:<platform>:meta               { stats, userProfiles }
+ *   sms:<platform>:cards              NoteCard[]
+ *   sms:<platform>:note:<note_id>     NoteEntry
+ *   sms:<platform>:comment:<note_id>  CommentEntry[]
+ *
+ * 旧版单 key 数据会在首次读取时自动迁移（迁移成功后才删除旧 key）。
  */
 
 import type { PlatformKey } from "../types/common";
@@ -62,6 +77,8 @@ export interface NoteEntry {
   source_user_id?: string;
   /** 所属平台（冗余存储便于导出） */
   platform?: PlatformKey;
+  /** B站专用：评论接口以 aid 为 oid，需要它才能把评论关联回 bvid */
+  aid?: number;
 }
 
 export interface CommentEntry {
@@ -95,6 +112,22 @@ export interface UserProfile {
   note_count: number;
   /** 首次采集时间 */
   first_seen: number;
+  /** 最近一次更新 */
+  updated_at?: number;
+  /** 以下字段仅部分平台提供 */
+  avatar?: string;
+  signature?: string;
+  follower_count?: number;
+  following_count?: number;
+  /** 获赞总数（抖音）/ 总播放（B站可拓展） */
+  total_favorited?: number;
+  platform?: PlatformKey;
+}
+
+export interface SnifferStats {
+  feedRequests: number;
+  commentRequests: number;
+  userPostedRequests: number;
 }
 
 export interface SnifferData {
@@ -106,14 +139,28 @@ export interface SnifferData {
   noteCards: NoteCard[];
   /** 采集到的博主信息 */
   userProfiles: Record<string, UserProfile>;
-  stats: {
-    feedRequests: number;
-    commentRequests: number;
-    userPostedRequests: number;
-  };
+  stats: SnifferStats;
+}
+
+/** 一次嗅探处理产生的增量变更，只有出现在这里的切片会被写盘 */
+export interface SnifferChange {
+  meta?: { stats: SnifferStats; userProfiles: Record<string, UserProfile> };
+  noteCards?: NoteCard[];
+  notes?: NoteEntry[];
+  comments?: Array<{ noteId: string; entries: CommentEntry[] }>;
+  /** 需要删除的评论分片（例如 aid_ 伪 key 合并后清理） */
+  removedComments?: string[];
 }
 
 // ── 初始状态 ──
+
+function emptyStats(): SnifferStats {
+  return {
+    feedRequests: 0,
+    commentRequests: 0,
+    userPostedRequests: 0,
+  };
+}
 
 function emptyData(): SnifferData {
   return {
@@ -121,45 +168,169 @@ function emptyData(): SnifferData {
     comments: {},
     noteCards: [],
     userProfiles: {},
-    stats: {
-      feedRequests: 0,
-      commentRequests: 0,
-      userPostedRequests: 0,
-    },
+    stats: emptyStats(),
   };
 }
 
-// ── Storage key — 每个平台独立 ──
+// ── Storage key 布局 ──
 
-const STORAGE_KEYS: Record<PlatformKey, string> = {
+const NAMESPACE = "sms";
+
+const PREFIXES: Record<PlatformKey, string> = {
+  xhs: `${NAMESPACE}:xhs:`,
+  bilibili: `${NAMESPACE}:bilibili:`,
+  douyin: `${NAMESPACE}:douyin:`,
+};
+
+/** v1 的单 key，仅用于迁移 */
+const LEGACY_KEYS: Record<PlatformKey, string> = {
   xhs: "cheat_sniffer_data",
   bilibili: "cheat_sniffer_data_bili",
   douyin: "cheat_sniffer_data_dy",
 };
 
-function getStorageKey(platform: PlatformKey): string {
-  return STORAGE_KEYS[platform];
+const NOTE_PREFIX = "note:";
+const COMMENT_PREFIX = "comment:";
+const META_KEY = "meta";
+const CARDS_KEY = "cards";
+
+function metaKey(platform: PlatformKey): string {
+  return PREFIXES[platform] + META_KEY;
 }
 
-// ── 读写 chrome.storage.local ──
+function cardsKey(platform: PlatformKey): string {
+  return PREFIXES[platform] + CARDS_KEY;
+}
 
+function noteKey(platform: PlatformKey, noteId: string): string {
+  return PREFIXES[platform] + NOTE_PREFIX + noteId;
+}
+
+function commentKey(platform: PlatformKey, noteId: string): string {
+  return PREFIXES[platform] + COMMENT_PREFIX + noteId;
+}
+
+// ── v1 → v2 迁移 ──
+//
+// 迁移用 Promise 缓存去重：同一个 JS 上下文里不会重复执行。
+// 跨上下文（service worker / side panel）可能各跑一次，但写入内容一致，
+// 且都遵循「先写 v2 再删旧 key」，最坏情况只是重复写一遍。
+
+const migrationTasks = new Map<PlatformKey, Promise<void>>();
+
+function ensureMigrated(platform: PlatformKey): Promise<void> {
+  const existing = migrationTasks.get(platform);
+  if (existing) return existing;
+
+  const task = migrateLegacy(platform).catch((err) => {
+    console.error("[SM Sniffer] 数据迁移失败:", err);
+  });
+  migrationTasks.set(platform, task);
+  return task;
+}
+
+async function migrateLegacy(platform: PlatformKey): Promise<void> {
+  const legacyKey = LEGACY_KEYS[platform];
+  const result = await chrome.storage.local.get(legacyKey);
+  const legacy = result[legacyKey] as SnifferData | undefined;
+  if (!legacy) return;
+
+  await writeSnapshot(platform, legacy);
+  await chrome.storage.local.remove(legacyKey);
+  console.log("[SM Sniffer] 已迁移 v1 数据到分片存储:", platform);
+}
+
+async function writeSnapshot(platform: PlatformKey, data: SnifferData): Promise<void> {
+  const batch: Record<string, unknown> = {
+    [metaKey(platform)]: {
+      stats: { ...emptyStats(), ...(data.stats ?? {}) },
+      userProfiles: data.userProfiles ?? {},
+    },
+    [cardsKey(platform)]: data.noteCards ?? [],
+  };
+
+  for (const [noteId, note] of Object.entries(data.notes ?? {})) {
+    batch[noteKey(platform, noteId)] = note;
+  }
+  for (const [noteId, comments] of Object.entries(data.comments ?? {})) {
+    batch[commentKey(platform, noteId)] = comments;
+  }
+
+  await chrome.storage.local.set(batch);
+}
+
+// ── 读取 ──
+
+/**
+ * 读取某个平台的全量数据（侧栏渲染、迁移后回读都走这里）。
+ *
+ * 底层是一次 `get(null)`：分片之后 key 数量多了，但每个分片都很小，
+ * 相比 v1 的单个巨型 key，整体传输量反而更低，也不会撞配额。
+ */
 export async function loadData(platform: PlatformKey = "xhs"): Promise<SnifferData> {
-  const key = getStorageKey(platform);
-  const result = await chrome.storage.local.get(key);
-  const data = (result[key] as SnifferData) ?? emptyData();
-  // 兼容旧数据：如果没有 userProfiles 字段就补上
-  if (!data.userProfiles) data.userProfiles = {};
+  await ensureMigrated(platform);
+
+  const prefix = PREFIXES[platform];
+  const all = (await chrome.storage.local.get(null)) as Record<string, unknown>;
+  const data = emptyData();
+
+  for (const key of Object.keys(all)) {
+    if (!key.startsWith(prefix)) continue;
+
+    const rest = key.slice(prefix.length);
+    const value = all[key];
+
+    if (rest === META_KEY) {
+      const meta = value as { stats?: Partial<SnifferStats>; userProfiles?: Record<string, UserProfile> } | undefined;
+      if (meta?.stats) data.stats = { ...emptyStats(), ...meta.stats };
+      if (meta?.userProfiles) data.userProfiles = meta.userProfiles;
+    } else if (rest === CARDS_KEY) {
+      if (Array.isArray(value)) data.noteCards = value as NoteCard[];
+    } else if (rest.startsWith(NOTE_PREFIX)) {
+      const noteId = rest.slice(NOTE_PREFIX.length);
+      if (value) data.notes[noteId] = value as NoteEntry;
+    } else if (rest.startsWith(COMMENT_PREFIX)) {
+      const noteId = rest.slice(COMMENT_PREFIX.length);
+      if (Array.isArray(value)) data.comments[noteId] = value as CommentEntry[];
+    }
+  }
+
   return data;
 }
 
-export async function saveData(data: SnifferData, platform: PlatformKey = "xhs"): Promise<void> {
-  const key = getStorageKey(platform);
-  await chrome.storage.local.set({ [key]: data });
+// ── 写入 ──
+
+/** 只写入本次真正发生变化的分片 */
+export async function saveChanges(platform: PlatformKey, change: SnifferChange): Promise<void> {
+  const batch: Record<string, unknown> = {};
+
+  if (change.meta) batch[metaKey(platform)] = change.meta;
+  if (change.noteCards) batch[cardsKey(platform)] = change.noteCards;
+  if (change.notes) {
+    for (const note of change.notes) batch[noteKey(platform, note.note_id)] = note;
+  }
+  if (change.comments) {
+    for (const { noteId, entries } of change.comments) {
+      batch[commentKey(platform, noteId)] = entries;
+    }
+  }
+
+  if (Object.keys(batch).length === 0) return;
+  await chrome.storage.local.set(batch);
+
+  if (change.removedComments?.length) {
+    await chrome.storage.local.remove(change.removedComments.map((id) => commentKey(platform, id)));
+  }
 }
 
+/** 清空某个平台的全部数据（含旧版 key） */
 export async function clearData(platform: PlatformKey = "xhs"): Promise<void> {
-  const key = getStorageKey(platform);
-  await chrome.storage.local.set({ [key]: emptyData() });
+  const prefix = PREFIXES[platform];
+  const all = (await chrome.storage.local.get(null)) as Record<string, unknown>;
+  const keys = Object.keys(all).filter(
+    (key) => key.startsWith(prefix) || key === LEGACY_KEYS[platform]
+  );
+  if (keys.length > 0) await chrome.storage.local.remove(keys);
 }
 
 // ── 辅助：安全转数字 ──
@@ -180,7 +351,8 @@ export function parseXhsPageContext(url: string): PageContext {
     if (userMatch) {
       return { page: "user", user_id: userMatch[1] };
     }
-    const noteMatch = u.pathname.match(/^\/explore\/([a-f0-9]+)/);
+    // 详情页有两种常见形态：/explore/{id} 和 /discovery/item/{id}
+    const noteMatch = u.pathname.match(/^\/(?:explore|discovery\/item)\/([a-f0-9]+)/);
     if (noteMatch) {
       return { page: "note_detail" };
     }
@@ -194,16 +366,28 @@ export function parseXhsPageContext(url: string): PageContext {
 export function parseBiliPageContext(url: string): PageContext {
   try {
     const u = new URL(url);
-    // /space/{mid} 或 /space/{mid}/video 等
+
+    // 个人空间有两种域名形态，都要认：
+    //   https://space.bilibili.com/{mid}/video
+    //   https://www.bilibili.com/space/{mid}
+    if (u.hostname === "space.bilibili.com") {
+      const subMatch = u.pathname.match(/^\/(\d+)/);
+      if (subMatch) {
+        return { page: "user", user_id: subMatch[1] };
+      }
+    }
+
     const spaceMatch = u.pathname.match(/^\/space\/(\d+)/);
     if (spaceMatch) {
       return { page: "user", user_id: spaceMatch[1] };
     }
+
     // /video/{bvid} 视频详情
     const videoMatch = u.pathname.match(/^\/video\/(BV[\w]+)/i);
     if (videoMatch) {
       return { page: "note_detail" };
     }
+
     return { page: "explore" };
   } catch {
     return { page: "explore" };

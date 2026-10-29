@@ -171,10 +171,13 @@
 
   // ── 上下文 URL 追踪 ──
 
+  // 从空间页点进视频时，只让「第一条」视频继承空间上下文，避免相关推荐串作者
   var contextUrl = window.location.href;
+  var pendingUserContext = isUserSpaceUrl(contextUrl) ? contextUrl : null;
 
   function isUserSpaceUrl(url) {
-    return /\/space\/\d+/.test(url);
+    // 兼容 space.bilibili.com/{mid} 与 www.bilibili.com/space/{mid} 两种形态
+    return /\/space\/\d+/.test(url) || /^https?:\/\/space\.bilibili\.com\/\d+/.test(url);
   }
 
   function isVideoDetailUrl(url) {
@@ -186,11 +189,22 @@
 
     if (isUserSpaceUrl(currentUrl)) {
       contextUrl = currentUrl;
-    } else if (isVideoDetailUrl(currentUrl) && isUserSpaceUrl(contextUrl)) {
-      // 从用户空间点进视频详情，保持用户空间上下文
-    } else {
-      contextUrl = currentUrl;
+      pendingUserContext = currentUrl;
+      return;
     }
+
+    if (isVideoDetailUrl(currentUrl)) {
+      if (pendingUserContext) {
+        contextUrl = pendingUserContext;
+        pendingUserContext = null; // 一次性消费
+      } else {
+        contextUrl = currentUrl;
+      }
+      return;
+    }
+
+    contextUrl = currentUrl;
+    pendingUserContext = null;
   }
 
   var originalPushState = history.pushState;
